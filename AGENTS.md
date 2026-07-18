@@ -80,8 +80,8 @@ gemm_y/
 ## Coding Conventions
 
 ### C++ / CUDA Style
-- **Modern C++17**: `constexpr`, `[[nodiscard]], `noexcept` where honest,
-  `std::span` is C++20 — do not use (we're on C++17).
+- **Modern C++17**: `constexpr`, `[[nodiscard]], `noexcept` where honest.
+- **Modern C++17**: `const` qualifiers for constants, things that may be calculated at compile time, are calculated at compile time.
 - **RAII** for all CUDA resources. Wrap `cudaMalloc`/`cudaFree` in a small
   device-buffer type; never leak raw `cudaFree` calls across early returns.
 - **No exceptions across the CUDA boundary** — kernels can't throw, and host
@@ -91,6 +91,8 @@ gemm_y/
   must outlive the consumer. Document at the call site.
 - **No `using namespace` in headers.**
 - **Header guards**: `#pragma once` (already the convention).
+
+ 
 
 ### CUDA-Specific
 - **Kernel timing**: use `cudaEvent` for device-side timing, **not** the host
