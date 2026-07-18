@@ -13,7 +13,6 @@
 
 #include "CudaCheck.h"
 #include "cuda_compat.h"
-#include <cublas_v2.h>
 
 namespace gemm_y {
 

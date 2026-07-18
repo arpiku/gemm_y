@@ -155,12 +155,11 @@ endif()
 message(STATUS "gemm_y: arch_src_dir=${_gemm_y_arch_src_dir}")
 message(STATUS "gemm_y: arch_sources=${_gemm_y_arch_sources}")
 
-# Arch-agnostic bench sources (Profiler only). The microbench files
-# (memcpy_microbench.cu, launch_overhead_microbench.cu) define their own
-# main() and are built as standalone executables below — exclude them from
-# the gemm_y target to avoid duplicate main() symbols.
-file(GLOB _gemm_y_bench_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/bench/*.cu")
-list(FILTER _gemm_y_bench_sources EXCLUDE REGEX "microbench\.cu$")
+# Arch-agnostic bench sources (Profiler only). Non-recursive glob: the
+# microbench files live in src/bench/microbench/ and have their own main()
+# (built as standalone EXCLUDE_FROM_ALL executables below).
+file(GLOB _gemm_y_bench_sources CONFIGURE_DEPENDS
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/bench/*.cu")
 
 # ---------------------------------------------------------------------------
 # Main executable
@@ -177,8 +176,12 @@ gemm_y_apply_common_flags(gemm_y)
 # ---------------------------------------------------------------------------
 # Build-verification + unit-test target
 # ---------------------------------------------------------------------------
+# test_cuda needs the same bench + arch sources as gemm_y so it can exercise
+# Profiler::run_sweep and the arch-specific NaiveGemm kernel.
 add_executable(test_cuda
     tests/test.cu
+    ${_gemm_y_arch_sources}
+    ${_gemm_y_bench_sources}
 )
 target_include_directories(test_cuda PRIVATE src)
 target_link_libraries(test_cuda PRIVATE CUDA::cublas)
@@ -191,14 +194,11 @@ gemm_y_apply_common_flags(test_cuda)
 # to the default `all` target so a plain `cmake --build build` only produces
 # gemm_y + test_cuda. Build explicitly with `cmake --build build --target
 # memcpy_microbench launch_overhead_microbench`.
-add_executable(memcpy_microbench EXCLUDE_FROM_ALL
-    src/bench/memcpy_microbench.cu
-)
-target_include_directories(memcpy_microbench PRIVATE src)
-gemm_y_apply_common_flags(memcpy_microbench)
-
-add_executable(launch_overhead_microbench EXCLUDE_FROM_ALL
-    src/bench/launch_overhead_microbench.cu
-)
-target_include_directories(launch_overhead_microbench PRIVATE src)
-gemm_y_apply_common_flags(launch_overhead_microbench)
+file(GLOB _gemm_y_microbench_sources CONFIGURE_DEPENDS
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/bench/microbench/*.cu")
+foreach(_src ${_gemm_y_microbench_sources})
+    get_filename_component(_name ${_src} NAME_WE)
+    add_executable(${_name} EXCLUDE_FROM_ALL ${_src})
+    target_include_directories(${_name} PRIVATE src)
+    gemm_y_apply_common_flags(${_name})
+endforeach()

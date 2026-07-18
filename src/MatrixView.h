@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <type_traits>
 
+#include "CudaCheck.h"
 #include "Layout.h"
 #include "Space.h"
 
@@ -54,7 +55,12 @@ struct MatrixView {
           ld(other.ld), layout(other.layout) {}
 
     // Zero-copy sub-view at offset (r,c) of size m x n. ld is unchanged.
+    // Debug-only bounds asserts catch silent OOB if misused (R18).
     [[nodiscard]] MatrixView<T, S> block(int r, int c, int m, int n) const noexcept {
+        GEMM_Y_ASSERT(r >= 0 && c >= 0 && m >= 0 && n >= 0,
+                      "block(): negative args");
+        GEMM_Y_ASSERT(r + m <= rows && c + n <= cols,
+                      "block(): submatrix exceeds parent bounds");
         T* offset = nullptr;
         if (layout == Layout::ColMajor) {
             offset = ptr + static_cast<std::ptrdiff_t>(r)

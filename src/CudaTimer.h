@@ -56,8 +56,9 @@ public:
     }
 
     // Blocks until the stop event has completed on the GPU, then returns
-    // elapsed time in milliseconds between start_ and stop_.
-    [[nodiscard]] float elapsed_ms() {
+    // elapsed time in milliseconds between start_ and stop_. const: the
+    // events are not modified, only synchronized and queried.
+    [[nodiscard]] float elapsed_ms() const {
         CUDA_CHECK(cudaEventSynchronize(stop_));
         float ms = 0.0f;
         CUDA_CHECK(cudaEventElapsedTime(&ms, start_, stop_));

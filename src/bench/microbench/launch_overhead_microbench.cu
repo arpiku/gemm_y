@@ -1,16 +1,19 @@
-// launch_overhead_microbench.cu — Chunk 2.4.
+// launch_overhead_microbench.cu — Chunk 2.4 (Phase 1.5: relocated to microbench/ subdir).
 //
 // Measures per-launch overhead of an empty kernel via CudaTimer. Sets the
 // floor for kernel time interpretation (a kernel reporting < launch overhead
 // is measurement noise). Documented in ARD.md.
+//
+// Phase 1.5 (R10): prints a human-readable aligned table.
 
-#include <algorithm>
-#include <cstdio>
+#include <string>
 #include <vector>
 
 #include "CudaCheck.h"
 #include "CudaTimer.h"
 #include "cuda_compat.h"
+#include "bench/Stats.h"
+#include "bench/microbench/print_table.h"
 
 namespace gemm_y {
 
@@ -32,14 +35,20 @@ int run_launch_overhead_main() {
         t.stop();
         ms.push_back(t.elapsed_ms());
     }
-    std::sort(ms.begin(), ms.end());
-    const double min_ns = static_cast<double>(ms.front()) * 1e6;
-    const double med_ns = (kIters % 2 == 0)
-        ? static_cast<double>(ms[kIters/2 - 1] + ms[kIters/2]) * 0.5 * 1e6
-        : static_cast<double>(ms[kIters/2]) * 1e6;
+    const bench::TimedStats s = bench::summarize_ns(ms);
     const double max_ns = static_cast<double>(ms.back()) * 1e6;
-    std::printf("launch_overhead: iters=%d  min=%.0f ns  median=%.0f ns  max=%.0f ns\n",
-                kIters, min_ns, med_ns, max_ns);
+
+    bench::Table tbl({"metric", "value (ns)"});
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%d", kIters);
+    tbl.add_row({"iters", std::string(buf)});
+    std::snprintf(buf, sizeof(buf), "%.0f", s.min_ns);
+    tbl.add_row({"min", std::string(buf)});
+    std::snprintf(buf, sizeof(buf), "%.0f", s.median_ns);
+    tbl.add_row({"median", std::string(buf)});
+    std::snprintf(buf, sizeof(buf), "%.0f", max_ns);
+    tbl.add_row({"max", std::string(buf)});
+    tbl.print();
     return 0;
 }
 

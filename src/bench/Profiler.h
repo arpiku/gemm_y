@@ -7,6 +7,16 @@
 // register_kernel<K>() type-erases into std::function once at registration.
 // Stateless K (the common case) fits SBO; stateful K pays one heap alloc,
 // amortized across the full sweep (see ARD.md §4 overhead analysis).
+//
+// Phase 1.5 (R3): run_sweep returns SweepResult — a vector of SweepRow —
+// instead of writing CSV directly. main.cpp owns CsvWriter and iterates
+// result.rows. This decouples bench logic from I/O and makes run_sweep
+// testable in isolation.
+//
+// Phase 1.5 (R4): cuBLAS is measured once per N, stored as the first row
+// per N in SweepResult, and its kernel_min_ns / kernel_median_ns are
+// reused as the ref_* columns for every subsequent kernel row at that N.
+// The Phase 1 implementation re-timed cuBLAS per registered kernel.
 
 #pragma once
 
@@ -15,16 +25,38 @@
 #include <vector>
 
 #include "CudaTimer.h"
-#include "cublas/CublasHandle.h"
 #include "GemmArgs.h"
 #include "KernelTraits.h"
 #include "Matrix.h"
 #include "MatrixView.h"
 #include "Space.h"
 #include "cuda_compat.h"
+#include "cublas/CublasHandle.h"
 #include "cublas/cublas_gemm.h"
 
 namespace gemm_y {
+
+// One row of the sweep result. Maps 1:1 to a CSV row. POD; pass-by-value.
+struct SweepRow {
+    std::string arch;
+    std::string dtype;
+    int N;
+    std::string kernel_name;
+    std::string kernel_desc;
+    double h2d_ns;               // global H2D time (A+B), repeated per row (R15)
+    double kernel_min_ns;
+    double kernel_median_ns;
+    double d2h_ns;
+    double ref_kernel_min_ns;   // cuBLAS min at this N (== kernel_* for the cuBLAS row)
+    double ref_kernel_median_ns;
+    double max_abs_err;
+    double max_rel_err;
+};
+
+// Result of a full sweep. main.cpp iterates rows to write CSV.
+struct SweepResult {
+    std::vector<SweepRow> rows;
+};
 
 template <typename T>
 class Profiler {
@@ -55,10 +87,11 @@ public:
 
     // Run the full sweep. Pre-allocates 4096x4096 device + host buffers,
     // fills A/B with a deterministic pattern, copies A/B to device once,
-    // then per N: runs cuBLAS reference, then each registered kernel with
-    // warmup=20 / timed=50, computes accuracy vs cuBLAS, writes a CSV row.
+    // then per N: runs cuBLAS reference once, then each registered kernel
+    // with warmup=20 / timed=50, computes accuracy vs cuBLAS, appends a
+    // SweepRow to the result. Returns the SweepResult; does NOT write CSV.
     // Implementation lives in Profiler.cu (compiled per arch).
-    void run_sweep(const std::vector<int>& sizes, const std::string& out_csv_path);
+    [[nodiscard]] SweepResult run_sweep(const std::vector<int>& sizes);
 
 private:
     std::vector<Entry> kernels_;

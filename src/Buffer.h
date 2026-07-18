@@ -54,12 +54,11 @@ public:
     [[nodiscard]] std::size_t bytes() const noexcept { return storage_.size() * sizeof(T); }
 
 private:
-    // 64-byte alignment matches cache lines and is friendly to vectorized
-    // host-side reference computation. std::vector default alignment is
-    // typically 16 bytes; we don't need more for Phase 1.
-    // NB: std::vector doesn't expose an alignment knob, so we rely on the
-    // default allocator. If a future phase needs explicit 64B alignment,
-    // swap in a custom allocator here without touching call sites.
+    // Host Buffer uses std::vector's default allocator, which gives ~16-byte
+    // alignment (sufficient for Phase 1 host-side reference computation).
+    // If a future phase needs explicit 64-byte alignment (e.g. for AVX-512
+    // host-side reference), swap in a custom allocator here without
+    // touching call sites.
     std::vector<T> storage_;
 };
 

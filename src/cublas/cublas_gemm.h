@@ -14,7 +14,6 @@
 #include "CublasHandle.h"
 #include "MatrixView.h"
 #include "cuda_compat.h"
-#include <cublas_v2.h>
 
 namespace gemm_y {
 
@@ -64,8 +63,13 @@ void cublas_gemm(CublasHandle& handle,
     }
     if (A.layout != Layout::ColMajor || B.layout != Layout::ColMajor ||
         C.layout != Layout::ColMajor) {
-        std::fprintf(stderr, "cublas_gemm: only ColMajor supported in Phase 1\n");
-        std::abort();
+        // Phase 1 invariant: all views are ColMajor. The bench runner
+        // guarantees this; a violation is a programming error, not a
+        // runtime API contract. Debug-only assert (R19).
+        GEMM_Y_ASSERT(A.layout == Layout::ColMajor &&
+                      B.layout == Layout::ColMajor &&
+                      C.layout == Layout::ColMajor,
+                      "cublas_gemm: only ColMajor supported in Phase 1");
     }
 
     using TM = detail::CublasTypeMap<T>;

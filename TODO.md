@@ -27,86 +27,55 @@ Profiler from CSV, deduplicate, improve test coverage and microbench
 readability. No new features. See ARD §13 for rationale per item.
 
 ### Core fixes
-- [ ] **R1** `Copy.h`: revert to sync `cudaMemcpy` / `cudaMemcpy2D`.
-  Drop `cudaStream_t` param + `cudaStreamSynchronize` calls. Rationale:
-  async-on-pageable-host is silently sync + extra staging overhead
-  (microbench confirmed sync ≈ async). Pinned memory deferred to Phase 2.
-- [ ] **R2** `Copy.h`: extract `detail::plan_copy(dst, src)` computing
-  `{width_bytes, height, spitch, dpitch, contiguous}` from shape/layout
-  checks. `copy_h2d` / `copy_d2h` become 5-line wrappers over
-  `detail::copy_contiguous` / `detail::copy_strided`. Eliminates ~50 lines
-  of duplication.
-- [ ] **R3** `Profiler`: decouple `run_sweep` from CSV. Return
-  `SweepResult { std::vector<SweepRow> rows; }`. `main.cpp` owns `CsvWriter`
-  and iterates `result.rows`. `Profiler.cu` drops `#include "CsvWriter.h"`.
-- [ ] **R4** `Profiler`: measure cuBLAS **once per N**, store in
-  `SweepResult`, reuse `ref_*` columns for all kernels at that N. Current
-  code re-times cuBLAS per registered kernel (K × S × kTimed extra launches).
+- [x] **R1** `Copy.h`: reverted to sync `cudaMemcpy` / `cudaMemcpy2D`.
+  Dropped `cudaStream_t` param + `cudaStreamSynchronize` calls. Async-on-
+  pageable is silently sync + staging overhead; pinned memory deferred to
+  Phase 2.
+- [x] **R2** `Copy.h`: extracted `detail::plan_copy` + `copy_contiguous` /
+  `copy_strided`. `copy_h2d` / `copy_d2h` are now 5-line wrappers.
+- [x] **R3** `Profiler`: `run_sweep` returns `SweepResult { vector<SweepRow> }`.
+  `main.cpp` owns `CsvWriter` and iterates `result.rows`. `Profiler.cu` no
+  longer includes `CsvWriter.h`.
+- [x] **R4** `Profiler`: cuBLAS measured once per N, stored in `SweepResult`,
+  `ref_*` columns reused for all kernels at that N.
 
 ### Header hygiene
-- [ ] **R5** `cuda_compat.h`: add `#include <cublas_v2.h>` under the
-  diagnostic pragma. Remove direct `<cublas_v2.h>` includes from
-  `CudaCheck.h`, `CublasHandle.h`, `cublas_gemm.h`.
-- [ ] **R6** `Buffer.h`: fix misleading "64-byte alignment" comment —
-  `std::vector` default allocator gives ~16 bytes. State: default
-  alignment sufficient for Phase 1; swap in aligned allocator later
-  without touching call sites.
+- [x] **R5** `cuda_compat.h`: includes `<cublas_v2.h>` under the pragma.
+  Removed direct `<cublas_v2.h>` includes from `CudaCheck.h`,
+  `CublasHandle.h`, `cublas_gemm.h`.
+- [x] **R6** `Buffer.h`: fixed misleading alignment comment.
 
 ### Test suite
-- [ ] **R7** `test.cu`: remove `test_smoke` (redundant, RAII violation via
-  raw `cudaMalloc`/`cudaFree`). Trim `test_buffer_device` to Buffer
-  invariants only (drop round-trip — covered by Copy tests).
-- [ ] **R8** `test.cu`: strengthen `test_cuda_timer` (assert `0 < ms < 100`
-  after empty kernel). Add:
-  - `test_matrixview_const_conversion` (T → const T compiles; reverse is
-    a compile error — document via comment).
-  - `test_matrix_view_from_matrix` (non-const `view()` mutable; const
-    `view()` read-only).
-  - `test_cublas_gemm_bf16_strided` (N=32 submatrix of 64×64, ld=64 —
-    catches the bench runner's exact dependency).
-  - `test_naive_gemm_bf16` (N=32 vs host fp32 ref, `max_rel_err ≤ 1e-3`).
-  - `test_profiler_run_sweep_small` (post-R3: register NaiveGemm, sweep
-    `{32,64}`, assert 4 rows, all `max_rel_err ≤ kRelErrTol`).
+- [x] **R7** `test.cu`: removed `test_smoke`; trimmed `test_buffer_device` to
+  Buffer invariants only.
+- [x] **R8** `test.cu`: strengthened `test_cuda_timer` (`0 < ms < 100`); added
+  `test_matrixview_const_conversion`, `test_matrix_view_from_matrix`,
+  `test_cublas_gemm_bf16_strided`, `test_naive_gemm_bf16`,
+  `test_profiler_run_sweep_small`. 874 checks total.
 
 ### Microbench readability + relocation
-- [ ] **R9** Move `memcpy_microbench.cu` + `launch_overhead_microbench.cu`
-  to `src/bench/microbench/` subdirectory. CMake: glob
-  `src/bench/*.cu` (non-recursive) for `gemm_y` target; glob
-  `src/bench/microbench/*.cu` for per-file `EXCLUDE_FROM_ALL` targets.
-  Cleaner than the current `list(FILTER ... REGEX "microbench\.cu$")`.
-- [ ] **R10** Add `src/bench/microbench/print_table.h` — tiny helper for
-  aligned fixed-width column output. Refactor both microbenches to print
-  human-readable tables (header row + separator + aligned columns, units
-  in header). Drop raw CSV-to-stdout (microbenches are one-off, not
-  plotted in Phase 1.5; future plotting util will consume structured output
-  if needed).
+- [x] **R9** Moved microbenches to `src/bench/microbench/`. CMake: non-recursive
+  glob `src/bench/*.cu` for `gemm_y`; glob `src/bench/microbench/*.cu` for
+  per-file `EXCLUDE_FROM_ALL` targets (dropped `list(FILTER ... REGEX)`).
+- [x] **R10** Added `src/bench/microbench/print_table.h` — aligned fixed-width
+  column output. Both microbenches print human-readable tables.
 
 ### Deduplication / extraction
-- [ ] **R11** Extract `src/Arch.h` — single `kArchName` definition
-  (currently duplicated in `main.cpp`, `test.cu`, `Profiler.cu`).
-- [ ] **R12** Extract `src/bench/Stats.h` — `TimedStats` + `summarize_ns`
-  (currently duplicated in `Profiler.cu` as `TimedStats` and
-  `memcpy_microbench.cu` as `Stats`).
-- [ ] **R13** Extract `src/bench/Fill.h` — `fill_sequential(A, B)` host
-  fill pattern (currently duplicated in `Profiler.cu` and `test.cu`).
-- [ ] **R14** Extract `src/dtypes.h` — `dtypes::name<T>()` returning
-  `string_view`. Replace `dtype_name<T>()` in `Profiler.cu`. Co-locate
-  with `dtypes::bf16/fp16/fp32` aliases (move from `cuda_compat.h`).
+- [x] **R11** Extracted `src/Arch.h` — single `kArchName` definition.
+- [x] **R12** Extracted `src/bench/Stats.h` — `TimedStats` + `summarize_ns`.
+- [x] **R13** Extracted `src/bench/Fill.h` — `fill_sequential(A, B)`.
+- [x] **R14** Extracted `src/dtypes.h` — `dtypes::name<T>()`; co-located
+  `bf16`/`fp16`/`fp32` aliases (moved from `cuda_compat.h`).
 
 ### Minor correctness / style
-- [ ] **R15** `Profiler.cu`: `h2d_ns` column — repeat global H2D value in
-  every row, not `0.0` (current `0.0` is misleading).
-- [ ] **R16** `Profiler.cu`: `Timer<>` default capacity (drop `<4096>` —
-  only 3 marks used).
-- [ ] **R17** `CudaTimer::elapsed_ms()` — mark `const`.
-- [ ] **R18** `MatrixView::block()` — add `#ifndef NDEBUG` bounds asserts
-  (`r+m <= rows`, `c+n <= cols`).
-- [ ] **R19** `cublas_gemm.h`: extract `GEMM_Y_ASSERT(cond, msg)` macro
-  to `CudaCheck.h`. Layout check → debug-only assert (Phase 1 invariant,
-  not a runtime API contract).
-- [ ] **R20** `CudaCheck.h`: rename macro local vars `_gemm_y_err` →
-  `gemm_y_err_` (suffix-underscore convention; avoids reserved-identifier
-  edge cases).
+- [x] **R15** `Profiler.cu`: `h2d_ns` column repeats global H2D value per row.
+- [x] **R16** `Profiler.cu`: `Timer<>` default capacity (dropped `<4096>`).
+- [x] **R17** `CudaTimer::elapsed_ms()` marked `const`.
+- [x] **R18** `MatrixView::block()`: debug-only bounds asserts.
+- [x] **R19** `cublas_gemm.h`: extracted `GEMM_Y_ASSERT` to `CudaCheck.h`;
+  layout check is now a debug-only assert.
+- [x] **R20** `CudaCheck.h`: renamed macro local vars to `gemm_y_err_` /
+  `gemm_y_stat_` (suffix-underscore convention).
 
 ---
 
