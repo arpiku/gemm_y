@@ -5,6 +5,26 @@
 > decisions change; do not delete historical context — strike through and
 > supersede.
 
+## Table of contents
+
+1.  Memory model: ownership / shape / space, separated
+2.  Memcpy variant selection
+3.  Kernel abstraction: functors, not function pointers
+4.  Profiler: type-erased registry, cuBLAS implicit
+5.  Bench runner: pre-alloc + submatrix slicing
+5.5. cuBLAS handle: stateful context, per-call stream binding
+6.  Accuracy tolerance
+7.  Timing: `CudaTimer` (device) vs `Tracer` (host)
+8.  Arch-specific code: separate `.cu` files, no `#ifdef`
+9.  cuBLAS API choice: `cublasGemmEx` first
+10. Phase 1 validation
+11. Iteration policy: warmup / timed counts
+12. Phase 2 plan
+13. Phase 1.5 refactor inventory
+14. Phase 1.5 validation
+
+---
+
 ## 1. Memory model: ownership / shape / space, separated
 
 ### Decision
@@ -612,3 +632,26 @@ cleanup was made. Items map to `TODO.md` Phase 1.5 R1–R20.
 | R18 | `MatrixView.h` | `block()` debug-only bounds asserts | Silent OOB if misused; cheap debug-only check |
 | R19 | `cublas_gemm.h` | Extract `GEMM_Y_ASSERT`; layout check → debug assert | 13 lines of `fprintf`+`abort` is noise; Phase 1 invariant, not runtime API contract |
 | R20 | `CudaCheck.h` | Rename macro local vars `_gemm_y_err` → `gemm_y_err_` | Suffix-underscore avoids reserved-identifier edge cases |
+
+---
+
+## 14. Phase 1.5 validation
+
+### Exit criteria
+- All R1–R20 refactor items landed; `test_cuda` passes with 874 checks.
+- `Copy.h` reverted to sync; `Profiler::run_sweep` returns `SweepResult`;
+  cuBLAS measured once per N.
+- Microbenches relocated to `src/bench/microbench/` with human-readable
+  table output.
+- Dedup extractions (`Arch.h`, `Stats.h`, `Fill.h`, `dtypes.h`) in place.
+
+### Results
+```
+# Phase 1.5 refactor complete. No new features; correctness + hygiene only.
+# Test suite: 874 checks, 0 failures (was ~30 checks pre-Phase 1.5).
+# Copy.h: ~50 lines of duplication eliminated via detail::plan_copy.
+# Profiler: cuBLAS re-timing removed; sweep ~K× faster on K-kernel runs.
+# Microbench output: human-readable tables replace raw CSV-to-stdout.
+#
+# Phase history: git log --grep="Phase: 1.5"
+```

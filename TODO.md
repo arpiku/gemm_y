@@ -1,83 +1,9 @@
 # TODO.md
 
-> Per-branch task list. Edit at the start of each branch with planned steps;
-> check off as you go. Do not carry over completed items from previous
-> branches. Durable project state lives in `AGENTS.md`.
->
-> Architecture rationale: see `ARD.md`.
-
-## DONE — Phase 1 (`phase1/infra`)
-
-Foundation, matrix DS, timing, cuBLAS bf16 reference, profiler, harness
-validation via naive bf16 kernel. Full sweep produces clean CSV on sm_120.
-
-- [x] Foundation: `cuda_compat.h`, `CudaCheck.h`, cuBLAS link, `Tracer.h` comment.
-- [x] Matrix DS: `Space`, `Layout`, `Buffer`, `MatrixView`, `Matrix`, `Copy` + tests.
-- [x] Timing: `CudaTimer`, memcpy microbench, launch overhead microbench.
-- [x] cuBLAS reference: `CublasHandle`, `cublas_gemm` (bf16), unit test.
-- [x] Profiler: `GemmArgs`, `KernelTraits`, `Profiler`, `Accuracy`, `CsvWriter`, CLI.
-- [x] Harness validation: `NaiveGemm<bf16>` on sm120 + sm90, full sweep, ARD §10.
-
----
-
-## Phase 1.5 — Refactor (cleanups from code review)
-
-Goal: fix correctness issues (sync memcpy, cuBLAS re-timing), decouple
-Profiler from CSV, deduplicate, improve test coverage and microbench
-readability. No new features. See ARD §13 for rationale per item.
-
-### Core fixes
-- [x] **R1** `Copy.h`: reverted to sync `cudaMemcpy` / `cudaMemcpy2D`.
-  Dropped `cudaStream_t` param + `cudaStreamSynchronize` calls. Async-on-
-  pageable is silently sync + staging overhead; pinned memory deferred to
-  Phase 2.
-- [x] **R2** `Copy.h`: extracted `detail::plan_copy` + `copy_contiguous` /
-  `copy_strided`. `copy_h2d` / `copy_d2h` are now 5-line wrappers.
-- [x] **R3** `Profiler`: `run_sweep` returns `SweepResult { vector<SweepRow> }`.
-  `main.cpp` owns `CsvWriter` and iterates `result.rows`. `Profiler.cu` no
-  longer includes `CsvWriter.h`.
-- [x] **R4** `Profiler`: cuBLAS measured once per N, stored in `SweepResult`,
-  `ref_*` columns reused for all kernels at that N.
-
-### Header hygiene
-- [x] **R5** `cuda_compat.h`: includes `<cublas_v2.h>` under the pragma.
-  Removed direct `<cublas_v2.h>` includes from `CudaCheck.h`,
-  `CublasHandle.h`, `cublas_gemm.h`.
-- [x] **R6** `Buffer.h`: fixed misleading alignment comment.
-
-### Test suite
-- [x] **R7** `test.cu`: removed `test_smoke`; trimmed `test_buffer_device` to
-  Buffer invariants only.
-- [x] **R8** `test.cu`: strengthened `test_cuda_timer` (`0 < ms < 100`); added
-  `test_matrixview_const_conversion`, `test_matrix_view_from_matrix`,
-  `test_cublas_gemm_bf16_strided`, `test_naive_gemm_bf16`,
-  `test_profiler_run_sweep_small`. 874 checks total.
-
-### Microbench readability + relocation
-- [x] **R9** Moved microbenches to `src/bench/microbench/`. CMake: non-recursive
-  glob `src/bench/*.cu` for `gemm_y`; glob `src/bench/microbench/*.cu` for
-  per-file `EXCLUDE_FROM_ALL` targets (dropped `list(FILTER ... REGEX)`).
-- [x] **R10** Added `src/bench/microbench/print_table.h` — aligned fixed-width
-  column output. Both microbenches print human-readable tables.
-
-### Deduplication / extraction
-- [x] **R11** Extracted `src/Arch.h` — single `kArchName` definition.
-- [x] **R12** Extracted `src/bench/Stats.h` — `TimedStats` + `summarize_ns`.
-- [x] **R13** Extracted `src/bench/Fill.h` — `fill_sequential(A, B)`.
-- [x] **R14** Extracted `src/dtypes.h` — `dtypes::name<T>()`; co-located
-  `bf16`/`fp16`/`fp32` aliases (moved from `cuda_compat.h`).
-
-### Minor correctness / style
-- [x] **R15** `Profiler.cu`: `h2d_ns` column repeats global H2D value per row.
-- [x] **R16** `Profiler.cu`: `Timer<>` default capacity (dropped `<4096>`).
-- [x] **R17** `CudaTimer::elapsed_ms()` marked `const`.
-- [x] **R18** `MatrixView::block()`: debug-only bounds asserts.
-- [x] **R19** `cublas_gemm.h`: extracted `GEMM_Y_ASSERT` to `CudaCheck.h`;
-  layout check is now a debug-only assert.
-- [x] **R20** `CudaCheck.h`: renamed macro local vars to `gemm_y_err_` /
-  `gemm_y_stat_` (suffix-underscore convention).
-
----
+> Forward-looking task list. Completed work lives in git history
+> (`git log --grep="Phase: X.X"`) and ARD phase-summary sections.
+> Do not carry completed items here. Durable project state in `AGENTS.md`;
+> decision rationale in `ARD.md`.
 
 ## Phase 2A — cuBLAS references for all paths
 
@@ -159,7 +85,7 @@ plan in a separate `bf16_tiling_128` branch TODO.
 
 ---
 
-## Phase 2 prep (deferred, not implemented in 1.5 or 2A)
+## Phase 2 prep (deferred, not implemented in 2A)
 
 - `Space::HostPinned` + `Buffer<T, HostPinned>` via `cudaHostAlloc`.
 - Bench runner host buffers → pinned.

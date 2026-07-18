@@ -65,17 +65,37 @@ Targets:
 ```
 gemm_y/
 ├── AGENTS.md              # this file — durable project spec
-├── TODO.md                # per-branch task list (edited per feature)
+├── ARD.md                 # architecture decision record (rationale)
+├── TODO.md                # forward-looking task list (no completed items)
 ├── CMakeLists.txt         # build system
 ├── src/
 │   ├── main.cpp           # entry point
 │   ├── Tracer.h           # host-side timer (steady_clock, C++17)
-│   ├── sm90/              # Hopper-specific kernels (reserved)
-│   └── sm120/             # Blackwell-specific kernels (reserved)
+│   ├── cuda_compat.h      # single CUDA include wrapper
+│   ├── CudaCheck.h        # CUDA_CHECK / CUBLAS_CHECK / GEMM_Y_ASSERT
+│   ├── CudaTimer.h        # RAII cudaEvent pair (device timing)
+│   ├── Space.h, Layout.h  # compile-time memory-space / layout tags
+│   ├── Buffer.h, Matrix.h, MatrixView.h, Copy.h
+│   ├── Arch.h, dtypes.h   # arch name + dtype aliases/names
+│   ├── bench/             # Profiler, GemmArgs, KernelTraits, Accuracy,
+│   │   ├── Stats.h, Fill.h, CsvWriter.h
+│   │   └── microbench/    # memcpy + launch-overhead microbenches
+│   ├── cublas/            # CublasHandle, cublas_gemm
+│   ├── sm90/              # Hopper-specific kernels
+│   └── sm120/             # Blackwell-specific kernels
 ├── tests/
-│   └── test.cu            # build-verification smoke test
-└── agent_history/         # gitignored — personal session log
+│   └── test.cu            # unit tests + build-verification
+└── scripts/              # (Phase 2B) plot.py + csv_loader.py
 ```
+
+## LLM Context Loading
+
+At session start, load:
+- `AGENTS.md` — always (durable contract).
+- `TODO.md` — always (what to do next; no completed items).
+- `ARD.md` — table of contents only; load specific sections on demand.
+
+Do not load `ARD.md` in full unless reviewing a specific decision.
 
 ## Coding Conventions
 
@@ -100,9 +120,9 @@ gemm_y/
   launch overhead). `Tracer` is for host-side orchestration only.
 - **Error checking**: every CUDA runtime call must be checked. Provide a
   `CUDA_CHECK(expr)` macro that prints `cudaGetErrorString` and aborts.
-- **Headers**: include `cuda_runtime.h` (and other CUDA headers) through a
-  single wrapper `src/cuda_compat.h` that suppresses `-Wold-style-cast` /
-  `-Wconversion` noise from NVIDIA's headers. (Not yet created — see TODO.)
+- **Headers**: include `cuda_runtime.h` (and other CUDA headers, including
+  `<cublas_v2.h>`) through a single wrapper `src/cuda_compat.h` that
+  suppresses `-Wold-style-cast` / `-Wconversion` noise from NVIDIA's headers.
 - **Arch-specific code**: prefer separate `.cu` files under `src/sm90/` and
   `src/sm120/` over `#ifdef` branches. CMake only compiles the directory
   matching `GEMM_Y_CUDA_ARCH`.
@@ -157,11 +177,16 @@ gemm_y/
 - **Commit message format**: Conventional Commits (`feat:`, `perf:`,
   `fix:`, `chore:`, `docs:`, `test:`, `bench:`). Body explains *why*,
   not just *what*.
-- **`TODO.md` is per-branch state**: edit it at the start of a branch
-  with the planned steps; check them off as you go. Do not carry over
-  completed items from previous branches.
+- **Phase trailer**: every commit body ends with a `Phase: X.X` footer
+  (e.g. `Phase: 1.5`, `Phase: 2A`). This is the durable phase-history
+  marker — query with `git log --grep="Phase: 1.5"`. No merge commits
+  required; fast-forward merges are fine.
+- **Completed work leaves `TODO.md`**: when a phase completes, cut its
+  section from `TODO.md`. The phase's commits (found via the trailer)
+  and the ARD phase-summary section (e.g. §10, §14) are the durable
+  record. `TODO.md` is forward-looking only.
 - **Never commit** `build/`, `results/`, `*.nsys-rep`, `*.ncu-rep`,
-  `compile_commands.json`, or `agent_history/` — all gitignored.
+  `compile_commands.json` — all gitignored.
 
 ## Profiling Tools
 - Profiling will be setup later (nsys & ncu)
