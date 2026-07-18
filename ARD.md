@@ -87,6 +87,22 @@ size sweep. Results recorded here once run:
 # interpretation: any kernel reporting < ~1.2 us is measurement noise.
 ```
 
+### Phase 1.5 correction — revert to sync
+The Phase 1 implementation used `cudaMemcpyAsync` + `cudaStreamSynchronize`
+on the default stream, believing this was forward-compatible with Phase 2
+explicit streams. **This was wrong**: `cudaMemcpyAsync` on pageable host
+memory (which `std::vector<T>` gives) is **silently synchronous** — the
+runtime stages through an internal pinned buffer (extra host-side copy),
+then issues the DMA. The microbench confirmed `sync ≈ async` because both
+are sync; the async path adds staging overhead for no benefit.
+
+**Phase 1.5 fix (R1):** revert `Copy.h` to sync `cudaMemcpy` /
+`cudaMemcpy2D`. Drop the `cudaStream_t` parameter and the
+`cudaStreamSynchronize` calls. True async is deferred to Phase 2 prep,
+where `Space::HostPinned` + `cudaHostAlloc` enables real overlap on an
+explicit stream. The `copy_h2d` / `copy_d2h` API regains the stream
+parameter only when pinned-ness is enforced at the call site.
+
 ---
 
 ## 3. Kernel abstraction: functors, not function pointers
@@ -168,6 +184,27 @@ first per `N`, cached on device, and used as the accuracy ground truth.
   for any stateless functor. Stateful functors exceeding SBO pay one heap
   alloc at `register_kernel` time, amortized across the full sweep.
 
+### Phase 1.5 decoupling — `run_sweep` returns `SweepResult`
+Phase 1 coupled benchmarking and serialization: `run_sweep(sizes, csv_path)`
+opened a `CsvWriter` internally and wrote rows as it ran. This conflated
+GPU work with I/O side effects, made `run_sweep` untestable in isolation,
+and buried the CSV schema inside bench logic.
+
+**Phase 1.5 fix (R3):** `run_sweep` returns `SweepResult { std::vector<SweepRow>
+rows; }`. `main.cpp` owns the `CsvWriter` and iterates `result.rows`.
+`Profiler.cu` drops `#include "CsvWriter.h"`. The CSV schema is now
+defined in one place (`main.cpp`), and `run_sweep` is testable: a unit
+test can register a kernel, sweep `{32, 64}`, and assert row counts +
+accuracy without touching disk.
+
+**Phase 1.5 fix (R4):** cuBLAS is measured **once per N**, stored in
+`SweepResult`, and its `ref_*` columns are reused for every kernel at
+that N. The Phase 1 implementation re-timed cuBLAS inside the per-kernel
+loop (K × S × kTimed extra launches) — a harness perf bug, not a kernel
+bug. After R3, the cuBLAS row is simply the first row per N in
+`SweepResult`; subsequent kernel rows reference its `kernel_min_ns` /
+`kernel_median_ns`.
+
 ---
 
 ## 5. Bench runner: pre-alloc + submatrix slicing
@@ -227,11 +264,18 @@ first per `N`, cached on device, and used as the accuracy ground truth.
 
 ### CSV schema
 ```
-arch,dtype,N,kernel_name,kernel_desc,h2d_ns,kernel_ns,d2h_ns,ref_kernel_ns,max_abs_err,max_rel_err
+arch,dtype,N,kernel_name,kernel_desc,h2d_ns,kernel_min_ns,kernel_median_ns,d2h_ns,ref_kernel_min_ns,ref_kernel_median_ns,max_abs_err,max_rel_err
 ```
 - `kernel_desc` carries design info (see §3) → plotter labels lines with it.
-- `ref_kernel_ns` is cuBLAS time at the same `N` — lets `plot.py` draw the
-  goal line per-kernel without a separate cuBLAS row.
+- `ref_kernel_min_ns` / `ref_kernel_median_ns` are cuBLAS time at the same
+  `N` — lets `plot.py` draw the goal line per-kernel without a separate
+  cuBLAS row.
+- **Phase 1.5 fix (R15):** `h2d_ns` is a global measurement (H2D of A+B
+  once at sweep start), not per-kernel. The Phase 1 implementation wrote
+  `0.0` in every row, which read as "H2D took 0 ns" — misleading. R15
+  repeats the global value in every row so the column is consistent and
+  pandas-friendly. A future schema revision may emit it once in a
+  metadata header line instead.
 
 ---
 
@@ -286,6 +330,31 @@ arch,dtype,N,kernel_name,kernel_desc,h2d_ns,kernel_ns,d2h_ns,ref_kernel_ns,max_a
   characterized (run cuBLAS vs cuBLAS to measure the floor), set tolerance to
   `max(1e-3, 10 × cuBLAS_self_err)`.
 
+### Phase 2 per-dtype tolerances
+Phase 2A introduces fp16, fp32-pedantic, and tf32 reference paths. Each
+has a different numerical floor, so `kRelErrTol` is specialized per dtype
+(Phase 1.5 R-adjacent: `Accuracy.h` gains `template <typename T> constexpr
+double kRelErrTol` specializations).
+
+| Path | Storage dtype | Compute | Hardware | Tolerance |
+|------|---------------|---------|----------|-----------|
+| 1 (primary)    | `bf16`  | fp32 accum, tensor cores | TC | 1e-2 |
+| 1 (primary)    | `fp16`  | fp32 accum, tensor cores | TC | 1e-3 |
+| 2 (secondary)  | `fp32`  | tf32, tensor cores       | TC | 1e-3 |
+| 3 (tertiary)   | `fp32`  | fp32, CUDA cores         | CUDA cores | 1e-5 |
+
+Rationale:
+- **bf16** (1e-2): same conservative Phase 1 value; bf16's 8-bit mantissa
+  is the loosest of the four.
+- **fp16** (1e-3): tighter mantissa (10 bits) than bf16; cuBLAS fp16
+  typically agrees with fp32 reference to ~1e-4.
+- **tf32** (1e-3): tf32 truncates fp32 mantissa to 10 bits (same as fp16)
+  but keeps fp32 range; tensor-core reduction order adds noise. 1e-3 is
+  conservative, matches fp16.
+- **fp32 pedantic** (1e-5): CUDA-core fp32 with fp32 accumulation is the
+  tightest; two correct implementations should agree to ~1e-6. 1e-5
+  leaves headroom for reduction-order divergence.
+
 ---
 
 ## 7. Timing: `CudaTimer` (device) vs `Tracer` (host)
@@ -339,6 +408,34 @@ arch,dtype,N,kernel_name,kernel_desc,h2d_ns,kernel_ns,d2h_ns,ref_kernel_ns,max_a
   competing at the cutting edge.
 - Switching later is a localized change to `src/cublas/cublas_gemm.h` —
   the `Profiler` and kernels are agnostic to which cuBLAS API is used.
+
+### Phase 2A — tf32 path via per-call math mode
+Phase 2A adds the tf32 reference path: `float` storage, tensor-core
+compute via `CUBLAS_TF32_CUBLAS_MATH`. tf32 truncates the fp32 mantissa
+to 10 bits (same as fp16) but keeps fp32 range, so it's a distinct
+compute mode on identical storage.
+
+**Design (R-adjacent: 2A.2, 2A.3):**
+- `cublas_gemm_tf32(handle, A, B, C, stream)` is a **distinct entry point**,
+  not an overload of `cublas_gemm`. The storage dtype (`float`) is
+  identical to pedantic fp32; the difference is the math mode, which
+  can't be expressed in the type system. A distinct name makes the
+  intent visible at call sites.
+- `CublasHandle::WithMathMode` is an RAII guard: ctor sets the mode via
+  `cublasSetMathMode`, dtor restores the previous mode. Used by
+  `cublas_gemm_tf32` around the `cublasGemmEx` call. Cleaner than manual
+  save/restore; guarantees restoration even on early-return paths.
+- **Non-thread-safe toggle** (already documented for `CublasHandle` in
+  §5.5): the math mode is handle state, so concurrent calls on the same
+  handle with different modes would race. Bench is single-threaded; no
+  issue. If multi-threaded bench ever lands, one handle per thread.
+
+**Profiler integration (2A.4):** `Profiler<float>` registers a
+`CublasTf32Reference` functor (wrapping `cublas_gemm_tf32`) alongside
+the pedantic fp32 reference. The fp32 CSV then has two reference rows per
+`N` (pedantic + tf32), showing the tensor-core speedup ceiling for fp32
+inputs. Custom fp32/tf32 kernels compare against the appropriate
+reference row.
 
 ---
 
@@ -428,3 +525,90 @@ arch,dtype,N,kernel_name,kernel_desc,h2d_ns,kernel_ns,d2h_ns,ref_kernel_ns,max_a
   consider **time-bounded mode** for small N: run for ≥10 ms total, count
   iters. Better signal-to-noise for sub-µs kernels than fixed count. Not
   needed in Phase 1 — naive kernel is slow enough that fixed-50 is fine.
+
+---
+
+## 12. Phase 2 plan
+
+### 12.1 Three paths (priority order)
+Phase 2 organizes work around three cuBLAS reference + custom-kernel paths:
+
+1. **Path 1 (primary)**: fp16 + bf16, tensor cores, fp32 accumulation.
+   fp16 and bf16 should show **no meaningful perf difference** on
+   Hopper/Blackwell tensor cores (same MMA throughput, same memory layout
+   width). Strategy: optimize one (bf16, as the Phase 1 baseline), then
+   replicate the final kernel's ideas to fp16 with minimal tuning.
+2. **Path 2 (secondary)**: fp32 storage, tf32 compute, tensor cores.
+   Second priority — relevant for fp32-input workloads that can tolerate
+   tf32's mantissa truncation. Same tensor-core MMA as Path 1, different
+   dtype config.
+3. **Path 3 (tertiary, reference-only)**: fp32 pedantic, CUDA cores.
+   May skip custom-kernel optimization entirely (CUDA-core GEMM is
+   bandwidth-bound and cuBLAS is already near-optimal). The reference
+   must exist so any custom kernel can be compared against it.
+
+### 12.2 Phase 2A — cuBLAS references for all paths
+- Verify fp32-pedantic path (no code change expected; `CublasTypeMap<float>`
+  already maps correctly).
+- Add `cublas_gemm_tf32` entry point + `CublasHandle::WithMathMode` RAII
+  guard (see §9).
+- `Profiler<float>` registers `CublasTf32Reference` alongside pedantic
+  fp32; fp32 CSV gets two reference rows per N.
+- `main.cpp` runs sweeps for bf16, fp16, fp32 (pedantic + tf32). One CSV
+  per `(arch, dtype)`; tf32 rows live in the fp32 CSV.
+- Per-dtype `kRelErrTol` specializations (see §6 table).
+- Unit tests for fp16/fp32/tf32 cuBLAS paths; tf32 test verifies math-mode
+  restore.
+
+### 12.3 Phase 2B — Plotting (parallel to 2A, no C++ dependency)
+- `scripts/plot.py` — Python + matplotlib, log-log, one PNG per
+  `(arch, dtype)`. cuBLAS line dashed; custom kernels Okabe-Ito palette.
+- `scripts/requirements.txt` — `matplotlib>=3.7`, `pandas>=2.0`.
+- CLI: single CSV or directory of CSVs.
+- **Future scope**: the plotting util will be extended in later phases to
+  also plot microbench data and other structured outputs. To enable this,
+  the CSV-reading layer is factored as a reusable module
+  (`scripts/csv_loader.py`) with a flexible schema, not hardcoded to the
+  bench-CSV columns. New plot types consume the loader and apply their
+  own column selection.
+
+### 12.4 Phase 2C — First tiled bf16 kernel (after 2A + 2B)
+- `src/sm120/gemm_bf16_tiled_128.cu` (+ `.cuh`) — 128×128 tile, 8 warps/CTA,
+  `wmma`/`mma.sync` for bf16 on sm_120.
+- `src/sm90/gemm_bf16_tiled_128.cu` (+ `.cuh`) — same algorithm, sm_90
+  `wmma` API.
+- Register in `main.cpp` alongside `NaiveGemm<bf16>`. Run sweep, plot,
+  compare vs cuBLAS line. Iterate per AGENTS.md experiment discipline
+  (one variable per commit).
+- Once bf16 tiled kernel is competitive, replicate ideas to fp16 (Path 1
+  sibling). Expect near-identical tensor-core perf.
+
+---
+
+## 13. Phase 1.5 refactor inventory
+
+One-line rationale per refactor item. Serves as audit trail for why each
+cleanup was made. Items map to `TODO.md` Phase 1.5 R1–R20.
+
+| ID | File / area | Change | Why |
+|----|-------------|--------|-----|
+| R1  | `Copy.h` | Revert to sync `cudaMemcpy`/`cudaMemcpy2D`; drop stream param | Async-on-pageable is silently sync + staging overhead (§2 correction) |
+| R2  | `Copy.h` | Extract `detail::plan_copy` + `copy_contiguous`/`copy_strided` | ~50 lines duplicated between `copy_h2d`/`copy_d2h` |
+| R3  | `Profiler` | `run_sweep` returns `SweepResult`; CSV writing moves to `main.cpp` | Decouple bench logic from I/O; make `run_sweep` testable |
+| R4  | `Profiler` | Measure cuBLAS once per N, reuse for all kernels | Phase 1 re-timed cuBLAS per kernel (K×S×kTimed extra launches) |
+| R5  | `cuda_compat.h` | Include `<cublas_v2.h>` under pragma; remove direct includes | AGENTS.md: all CUDA includes via the single wrapper |
+| R6  | `Buffer.h` | Fix misleading 64-byte alignment comment | `std::vector` default allocator gives ~16 bytes, not 64 |
+| R7  | `test.cu` | Remove `test_smoke`; trim `test_buffer_device` | `test_smoke` is RAII-violating and redundant; round-trip covered by Copy tests |
+| R8  | `test.cu` | Strengthen `test_cuda_timer`; add 5 new tests | Cover const-conversion, strided cuBLAS, naive kernel, small profiler sweep |
+| R9  | `src/bench/microbench/` | Move microbenches to subdir; cleaner CMake glob | Replace fragile `list(FILTER ... REGEX)` with directory-based selection |
+| R10 | `print_table.h` | Aligned fixed-width table output for microbenches | Raw CSV-to-stdout is hard to scan; one-off microbenches don't need CSV |
+| R11 | `src/Arch.h` | Single `kArchName` definition | Duplicated in `main.cpp`, `test.cu`, `Profiler.cu` |
+| R12 | `src/bench/Stats.h` | Extract `TimedStats` + `summarize_ns` | Duplicated in `Profiler.cu` and `memcpy_microbench.cu` |
+| R13 | `src/bench/Fill.h` | Extract `fill_sequential(A, B)` | Duplicated in `Profiler.cu` and `test.cu` |
+| R14 | `src/dtypes.h` | `dtypes::name<T>()`; co-locate dtype aliases | `dtype_name<T>()` in `Profiler.cu` is duplicated knowledge; inconsistent with `string_view` convention |
+| R15 | `Profiler.cu` | `h2d_ns` column repeats global value, not `0.0` | Current `0.0` reads as "H2D took 0 ns" — misleading |
+| R16 | `Profiler.cu` | `Timer<>` default capacity (drop `<4096>`) | Only 3 marks used; 4096 is confusing |
+| R17 | `CudaTimer.h` | `elapsed_ms()` marked `const` | No state mutation; const-correctness per AGENTS.md |
+| R18 | `MatrixView.h` | `block()` debug-only bounds asserts | Silent OOB if misused; cheap debug-only check |
+| R19 | `cublas_gemm.h` | Extract `GEMM_Y_ASSERT`; layout check → debug assert | 13 lines of `fprintf`+`abort` is noise; Phase 1 invariant, not runtime API contract |
+| R20 | `CudaCheck.h` | Rename macro local vars `_gemm_y_err` → `gemm_y_err_` | Suffix-underscore avoids reserved-identifier edge cases |
