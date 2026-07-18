@@ -1,0 +1,39 @@
+# Build artifacts
+build/
+build_*/
+out/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CMakeUserPresets.json
+compile_commands.json
+*.cmake.user
+
+# Compiler / linker output
+*.o
+*.obj
+*.so
+*.a
+*.dylib
+*.exe
+
+# CUDA profiler outputs
+*.nsys-rep
+*.ncu-rep
+*.qdrep
+*.qdstrm
+*.sqlite
+
+# IDE / editor
+.vscode/
+.idea/
+.cache/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
