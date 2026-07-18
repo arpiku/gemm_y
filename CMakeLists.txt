@@ -132,16 +132,35 @@ function(gemm_y_apply_common_flags target)
 endfunction()
 
 # ---------------------------------------------------------------------------
+# cuBLAS (required for the reference path)
+# ---------------------------------------------------------------------------
+find_package(CUDAToolkit REQUIRED)
+
+# ---------------------------------------------------------------------------
 # Arch-specific source directories (prepared, not populated)
 # ---------------------------------------------------------------------------
 # When src/sm90/ or src/sm120/ gain .cu files, only the directory matching the
 # selected arch is compiled in. Keeps "one binary per arch" clean.
 set(_gemm_y_arch_src_dir "${CMAKE_CURRENT_SOURCE_DIR}/src/${GEMM_Y_CUDA_ARCH}")
+# Directory naming convention is sm90 / sm120 (no underscore), while the
+# GEMM_Y_CUDA_ARCH cache variable uses the canonical sm_90 / sm_120 form.
+# Map between them so the glob finds the right directory.
+string(REPLACE "sm_" "sm" _gemm_y_arch_dir_name ${GEMM_Y_CUDA_ARCH})
+set(_gemm_y_arch_src_dir "${CMAKE_CURRENT_SOURCE_DIR}/src/${_gemm_y_arch_dir_name}")
 if(EXISTS "${_gemm_y_arch_src_dir}")
     file(GLOB _gemm_y_arch_sources CONFIGURE_DEPENDS "${_gemm_y_arch_src_dir}/*.cu")
 else()
     set(_gemm_y_arch_sources "")
 endif()
+message(STATUS "gemm_y: arch_src_dir=${_gemm_y_arch_src_dir}")
+message(STATUS "gemm_y: arch_sources=${_gemm_y_arch_sources}")
+
+# Arch-agnostic bench sources (Profiler only). The microbench files
+# (memcpy_microbench.cu, launch_overhead_microbench.cu) define their own
+# main() and are built as standalone executables below — exclude them from
+# the gemm_y target to avoid duplicate main() symbols.
+file(GLOB _gemm_y_bench_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/bench/*.cu")
+list(FILTER _gemm_y_bench_sources EXCLUDE REGEX "microbench\.cu$")
 
 # ---------------------------------------------------------------------------
 # Main executable
@@ -149,14 +168,37 @@ endif()
 add_executable(gemm_y
     src/main.cpp
     ${_gemm_y_arch_sources}
+    ${_gemm_y_bench_sources}
 )
 target_include_directories(gemm_y PRIVATE src)
+target_link_libraries(gemm_y PRIVATE CUDA::cublas)
 gemm_y_apply_common_flags(gemm_y)
 
 # ---------------------------------------------------------------------------
-# Build-verification target
+# Build-verification + unit-test target
 # ---------------------------------------------------------------------------
 add_executable(test_cuda
     tests/test.cu
 )
+target_include_directories(test_cuda PRIVATE src)
+target_link_libraries(test_cuda PRIVATE CUDA::cublas)
 gemm_y_apply_common_flags(test_cuda)
+
+# ---------------------------------------------------------------------------
+# Microbench targets (optional; not part of the default build)
+# ---------------------------------------------------------------------------
+# These are standalone executables with their own main(). They are NOT added
+# to the default `all` target so a plain `cmake --build build` only produces
+# gemm_y + test_cuda. Build explicitly with `cmake --build build --target
+# memcpy_microbench launch_overhead_microbench`.
+add_executable(memcpy_microbench EXCLUDE_FROM_ALL
+    src/bench/memcpy_microbench.cu
+)
+target_include_directories(memcpy_microbench PRIVATE src)
+gemm_y_apply_common_flags(memcpy_microbench)
+
+add_executable(launch_overhead_microbench EXCLUDE_FROM_ALL
+    src/bench/launch_overhead_microbench.cu
+)
+target_include_directories(launch_overhead_microbench PRIVATE src)
+gemm_y_apply_common_flags(launch_overhead_microbench)

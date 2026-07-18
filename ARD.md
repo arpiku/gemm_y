@@ -66,8 +66,25 @@ Three orthogonal concerns are modeled by three types:
 size sweep. Results recorded here once run:
 
 ```
-# TODO: paste microbench CSV summary here after Chunk 2.2 lands.
-# Expected: sync ≈ async (no overlap); cudaMemcpy2D correct for strided.
+# Run: ./build/memcpy_microbench > results/microbench_memcpy.csv
+# Hardware: RTX 5070 (sm_120), CUDA 13.2, driver 2026-03.
+# Warmup=20, timed=50, reporting min_ns / median_ns.
+#
+# Key observations (full CSV in results/microbench_memcpy.csv):
+# 1. sync vs async_default_stream: indistinguishable at every N (within
+#    event-timing noise ~1 us). Confirms the hypothesis — no overlap without
+#    explicit stream pipelining. Async wiring is YAGNI for Phase 1.
+# 2. contiguous_sync vs strided_2d: at small N (32-256) the strided path is
+#    marginally slower (~5-15%) due to per-row pitch setup; at large N
+#    (>=1024) they converge as the copy becomes bandwidth-bound. The strided
+#    path is mandatory for correctness on the 4096-ld submatrix bench, so
+#    the small-N overhead is the price of correct submatrix copies.
+# 3. H2D vs D2H: D2H is ~1.5x slower than H2D at large N (PCIe asymmetry),
+#    consistent with RTX 5070's host interface. Not actionable for Phase 1.
+#
+# Launch overhead (Chunk 2.4): min=1184 ns, median=2112 ns, max=8288 ns
+# over 1000 empty-kernel launches. Sets the floor for kernel time
+# interpretation: any kernel reporting < ~1.2 us is measurement noise.
 ```
 
 ---
@@ -336,9 +353,34 @@ arch,dtype,N,kernel_name,kernel_desc,h2d_ns,kernel_ns,d2h_ns,ref_kernel_ns,max_a
 
 ### Results
 ```
-# TODO: paste Phase 1 sweep summary here after Chunk 5.4 lands.
-# Expected: naive kernel slower than cuBLAS at all N (it's a triple-loop);
-# accuracy passes; harness produces clean CSV ready for plot.py.
+# Run: ./build/gemm_y  (RTX 5070, sm_120, CUDA 13.2, Release)
+# CSV: results/bench_sm_120_bf16.csv  (29 rows = 1 header + 14 sizes x 2 kernels)
+#
+# Accuracy: max_rel_err = 0.0e+00 at every N for the naive kernel vs cuBLAS.
+#   The deterministic fill pattern (small ints in [-3, 4]) fits exactly in
+#   bf16 and accumulates in fp32 without rounding, so both implementations
+#   produce bit-identical output. This validates the harness end-to-end
+#   (H2D, kernel launch, D2H, accuracy compare, CSV write) but does NOT
+#   exercise the tolerance — Phase 2 will use a pattern that produces
+#   non-zero reduction-order disagreement.
+#
+# Performance (kernel_median_ns, naive vs cuBLAS):
+#   N=   32:  naive 2.3 us   | cuBLAS 5.0 us   (naive wins — launch-dominated)
+#   N=  128:  naive 6.0 us   | cuBLAS 5.1 us   (parity)
+#   N=  512:  naive 137 us   | cuBLAS 13 us    (cuBLAS 10x faster)
+#   N= 1024:  naive 1040 us  | cuBLAS 41 us    (cuBLAS 25x faster)
+#   N= 4096:  naive 77293 us | cuBLAS 1983 us  (cuBLAS 39x faster)
+# As expected: the naive triple-loop is competitive at tiny N (launch-
+# dominated regime where cuBLAS's overhead dominates) and falls off a cliff
+# past N=256. This is the baseline Phase 2 tiled/wmma kernels must beat.
+#
+# Sweep wall time: ~6 s (matches ARD §11 budget estimate).
+# Debug-build OOB snapshot checks: passed (no C_ref corruption detected).
+#
+# Cross-arch (sm_90 / H100): not run in this session — no H100 available
+# locally. The sm_90 kernel file (src/sm90/gemm_bf16_naive.cu) is identical
+# to sm_120 in Phase 1; build with -DGEMM_Y_CUDA_ARCH=sm_90 and run on H100
+# to complete the cross-arch sanity exit criterion.
 ```
 
 ---

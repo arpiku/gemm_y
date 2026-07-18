@@ -1,3 +1,11 @@
+// Tracer.h — host-side timer using steady_clock.
+//
+// Host-only (steady_clock). Do NOT use for kernel timing; use CudaTimer
+// (cudaEvent_t) for device-side timing including H2D/D2H. Tracer measures
+// wall time including launch overhead (~5 us), which dominates for small
+// kernels and is useless for sub-us device work. Use Tracer only for host
+// orchestration (e.g. total sweep wall time, CSV write time).
+
 #pragma once
 
 #include <array>
