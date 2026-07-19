@@ -221,6 +221,32 @@ void test_copy_roundtrip_submatrix() {
 }
 
 // ---------------------------------------------------------------------------
+// Compile-time guarantees for detail::copy_kind_v (Phase 1.6.11)
+// ---------------------------------------------------------------------------
+// Wrong-direction instantiations (Host->Host, Device->Device) are rejected
+// by the static_assert inside detail::copy; the poison primary template
+// of copy_kind_v is the defensive secondary net. These static_asserts pin
+// the valid specializations so a future refactor that flips the mapping
+// fails to compile here.
+void test_copy_kind_compile_time() {
+    using gemm_y::Space;
+    using gemm_y::detail::copy_kind_v;
+
+    static_assert(copy_kind_v<Space::Device, Space::Host> == cudaMemcpyHostToDevice,
+                  "H2D must map to cudaMemcpyHostToDevice");
+    static_assert(copy_kind_v<Space::Host, Space::Device> == cudaMemcpyDeviceToHost,
+                  "D2H must map to cudaMemcpyDeviceToHost");
+
+    // Sanity: the kind enum values are distinct, so the table is not
+    // accidentally uniform.
+    static_assert(copy_kind_v<Space::Device, Space::Host> !=
+                  copy_kind_v<Space::Host, Space::Device>,
+                  "H2D and D2H kinds must differ");
+
+    ++g_checks;  // count the test as one exercised check
+}
+
+// ---------------------------------------------------------------------------
 // CudaTimer test (R8: strengthened — assert 0 < ms < 100 after empty kernel)
 // ---------------------------------------------------------------------------
 void test_cuda_timer() {
@@ -472,6 +498,7 @@ int main() {
     test_matrix_view_from_matrix();
     test_copy_roundtrip_full();
     test_copy_roundtrip_submatrix();
+    test_copy_kind_compile_time();
     test_cuda_timer();
     test_cublas_handle();
     test_cublas_gemm_bf16();

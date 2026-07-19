@@ -11,7 +11,12 @@
 //                                 Use for invariants; use CUDA_CHECK/CUBLAS_CHECK
 //                                 for runtime API contracts.
 //
-// Macro-local variables use the suffix-underscore convention (e.g. gemm_y_err_)
+// The `fprintf`+`abort` tail lives exactly once in `gemm_y::detail::fail_*`
+// (Phase 1.6.1). The macros are 5-line wrappers that delegate to those
+// helpers via fully-qualified `::gemm_y::detail::fail_*` so they expand
+// correctly whether used inside or outside `namespace gemm_y` (Phase 1.6.2).
+//
+// Macro-local variables use the suffix-underscore convention (e.g. e_, s_)
 // to avoid reserved-identifier edge cases (R20).
 
 #pragma once
@@ -21,60 +26,74 @@
 
 #include "cuda_compat.h"
 
-#define GEMM_Y_CUDA_CHECK_IMPL_(err_expr, file, line)                                  \
-    do {                                                                               \
-        const cudaError_t gemm_y_err_ = (err_expr);                                    \
-        if (gemm_y_err_ != cudaSuccess) {                                              \
-            std::fprintf(stderr,                                                       \
-                          "CUDA error at %s:%d: %s (code %d)\n",                        \
-                          file, line,                                                  \
-                          cudaGetErrorString(gemm_y_err_),                             \
-                          static_cast<int>(gemm_y_err_));                              \
-            std::abort();                                                              \
-        }                                                                              \
+namespace gemm_y {
+namespace detail {
+
+// Print "<tag> at <file>:<line>: <str> (code <n>)" then abort.
+// Shared by CUDA_CHECK (tag = "CUDA error") and CUDA_CHECK_LAST_ERROR
+// (tag = "CUDA async error"); only the tag string differs.
+[[noreturn]] inline void fail_cuda(cudaError_t e, const char* tag,
+                                   const char* file, int line) noexcept {
+    std::fprintf(stderr, "%s at %s:%d: %s (code %d)\n",
+                 tag, file, line, cudaGetErrorString(e),
+                 static_cast<int>(e));
+    std::abort();
+}
+
+// Print "cuBLAS error at <file>:<line>: <str> (code <n>)" then abort.
+[[noreturn]] inline void fail_cublas(cublasStatus_t s,
+                                     const char* file, int line) noexcept {
+    std::fprintf(stderr, "cuBLAS error at %s:%d: %s (code %d)\n",
+                 file, line, cublasGetStatusString(s),
+                 static_cast<int>(s));
+    std::abort();
+}
+
+} // namespace detail
+} // namespace gemm_y
+
+#define CUDA_CHECK(expr)                                                            \
+    do {                                                                            \
+        const cudaError_t e_ = (expr);                                              \
+        if (e_ != cudaSuccess)                                                      \
+            ::gemm_y::detail::fail_cuda(e_, "CUDA error", __FILE__, __LINE__);      \
     } while (0)
 
-#define CUDA_CHECK(expr) GEMM_Y_CUDA_CHECK_IMPL_(expr, __FILE__, __LINE__)
-
-#define CUDA_CHECK_LAST_ERROR()                                                         \
-    do {                                                                               \
-        const cudaError_t gemm_y_err_ = cudaPeekAtLastError();                          \
-        if (gemm_y_err_ != cudaSuccess) {                                              \
-            std::fprintf(stderr,                                                       \
-                          "CUDA async error at %s:%d: %s (code %d)\n",                 \
-                          __FILE__, __LINE__,                                          \
-                          cudaGetErrorString(gemm_y_err_),                             \
-                          static_cast<int>(gemm_y_err_));                              \
-            std::abort();                                                              \
-        }                                                                              \
+#define CUDA_CHECK_LAST_ERROR()                                                     \
+    do {                                                                            \
+        const cudaError_t e_ = cudaPeekAtLastError();                               \
+        if (e_ != cudaSuccess)                                                      \
+            ::gemm_y::detail::fail_cuda(e_, "CUDA async error", __FILE__, __LINE__);\
     } while (0)
 
-#define CUBLAS_CHECK(expr)                                                              \
-    do {                                                                                \
-        const cublasStatus_t gemm_y_stat_ = (expr);                                    \
-        if (gemm_y_stat_ != CUBLAS_STATUS_SUCCESS) {                                    \
-            std::fprintf(stderr,                                                       \
-                          "cuBLAS error at %s:%d: %s (code %d)\n",                      \
-                          __FILE__, __LINE__,                                          \
-                          cublasGetStatusString(gemm_y_stat_),                          \
-                          static_cast<int>(gemm_y_stat_));                             \
-            std::abort();                                                              \
-        }                                                                              \
+#define CUBLAS_CHECK(expr)                                                          \
+    do {                                                                            \
+        const cublasStatus_t s_ = (expr);                                           \
+        if (s_ != CUBLAS_STATUS_SUCCESS)                                            \
+            ::gemm_y::detail::fail_cublas(s_, __FILE__, __LINE__);                  \
     } while (0)
 
 // Debug-only assert. No-op in NDEBUG builds. Use for invariants that would
 // indicate a programming error, not for runtime API contracts (use
 // CUDA_CHECK / CUBLAS_CHECK for those).
+//
+// The NDEBUG branch keeps the condition parsed via `(void)sizeof(cond)` so
+// syntax errors / warnings in the condition are still caught under -DNDEBUG
+// (standard `assert` hygiene; Phase 1.6.3). The condition is not evaluated
+// at runtime under NDEBUG — matches standard `assert` semantics.
 #ifndef NDEBUG
-#  define GEMM_Y_ASSERT(cond, msg)                                                      \
-     do {                                                                              \
-         if (!(cond)) {                                                                \
-             std::fprintf(stderr,                                                      \
-                           "Assertion failed at %s:%d: %s\n  condition: %s\n",         \
-                           __FILE__, __LINE__, (msg), #cond);                          \
-             std::abort();                                                             \
-         }                                                                             \
+#  define GEMM_Y_ASSERT(cond, msg)                                                  \
+     do {                                                                          \
+         if (!(cond)) {                                                            \
+             std::fprintf(stderr,                                                  \
+                           "Assertion failed at %s:%d: %s\n  condition: %s\n",     \
+                           __FILE__, __LINE__, (msg), #cond);                      \
+             std::abort();                                                         \
+         }                                                                         \
      } while (0)
 #else
-#  define GEMM_Y_ASSERT(cond, msg) do { } while (0)
+#  define GEMM_Y_ASSERT(cond, msg)                                                 \
+     do {                                                                          \
+         (void)sizeof(cond);                                                        \
+     } while (0)
 #endif
