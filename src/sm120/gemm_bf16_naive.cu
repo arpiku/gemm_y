@@ -1,9 +1,10 @@
-// gemm_bf16_naive.cu — Blackwell (sm_120) naive bf16 GEMM kernel.
+// gemm_bf16_naive.cu — Blackwell (sm_120) naive GEMM kernel.
 //
 // Triple-loop, 1 thread per C[i][j], inner k loop. ld-aware (reads via
-// ptr + i + k*ld). Accumulate in fp32, cast back to bf16 on write.
+// ptr + i + k*ld). Accumulate in fp32, cast back to T on write.
 //
-// Perf-irrelevant — exists only to validate the harness end-to-end.
+// Perf-irrelevant — exists only to validate the harness end-to-end and
+// to give fp16/tfloat sweeps a custom kernel to compare against cuBLAS.
 // The struct declaration lives in the matching .cuh so main.cpp (a C++
 // TU) can register it with the Profiler.
 
@@ -59,8 +60,12 @@ void NaiveGemm<T>::operator()(GemmArgs<T> args, cudaStream_t /*stream*/) const {
         args.A, args.B, args.C);
 }
 
-// Explicit instantiation for the bf16 dtype. Instantiating the struct
-// emits all member definitions (including operator()).
+// Explicit instantiation for the supported dtypes. Instantiating the
+// struct emits all member definitions (including operator()). The naive
+// kernel is dtype-agnostic (it casts to fp32 for the accumulation and
+// back to T on the write), so one template definition serves all three.
 template struct NaiveGemm<__nv_bfloat16>;
+template struct NaiveGemm<__half>;
+template struct NaiveGemm<float>;
 
 } // namespace gemm_y

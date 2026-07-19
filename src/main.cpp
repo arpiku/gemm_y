@@ -1,12 +1,13 @@
 // main.cpp — gemm_y entry point.
 //
 // Runs three sequential sweeps (bf16, fp16, tfloat). Each sweep: construct a
-// Profiler<T>, register custom kernels (bf16 only for Phase 2A; fp16/tfloat
-// register cuBLAS-only — custom kernels land in Phase 2C), call run_sweep,
-// write the CSV + a key=value `.meta` sidecar to results/.
+// Profiler<T>, register NaiveGemm<T> (the baseline custom kernel), call
+// run_sweep, write the CSV + a key=value `.meta` sidecar to results/.
+// Tensor-core tiled variants are deferred — the naive kernel gives every
+// dtype a custom kernel to compare against the cuBLAS reference.
 //
-// One (arch, dtype) pair per CSV. tf32 rows live in the tfloat CSV (the only
-// float path — see ARD §9). Hardcoded sweep (no argparse dependency).
+// One (arch, dtype) pair per CSV. tf32 rows live in the tfloat CSV (the
+// only float path — see ARD §9). Hardcoded sweep (no argparse dependency).
 
 #include <chrono>
 #include <cstdio>
@@ -122,31 +123,40 @@ int main() {
         std::printf("gemm_y: done. %zu rows written to %s\n", result.rows.size(), out_csv.c_str());
     }
 
-    // fp16: cuBLAS-only for Phase 2A (custom kernel deferred to Phase 2C).
+    // fp16: register NaiveGemm (custom kernel for comparison vs cuBLAS).
     {
         using T = gemm_y::dtypes::fp16;
         gemm_y::Profiler<T> prof;
+        prof.register_kernel<gemm_y::NaiveGemm<T>>();
         const gemm_y::SweepResult result = prof.run_sweep(kSweepSizes);
 
         const std::string out_csv = "results/bench_" + arch + "_fp16.csv";
         const std::string out_meta = "results/bench_" + arch + "_fp16.meta";
         std::printf("gemm_y: arch=%s dtype=fp16  out=%s\n", arch.c_str(), out_csv.c_str());
         write_csv(result, out_csv);
-        write_meta(out_meta, arch, "fp16", 20, 50, gemm_y::kRelErrTol<T>(), {});
+        std::vector<std::pair<std::string, std::string>> kernels;
+        kernels.emplace_back(std::string(gemm_y::NaiveGemm<T>::name()),
+                             std::string(gemm_y::NaiveGemm<T>::description()));
+        write_meta(out_meta, arch, "fp16", 20, 50, gemm_y::kRelErrTol<T>(), kernels);
         std::printf("gemm_y: done. %zu rows written to %s\n", result.rows.size(), out_csv.c_str());
     }
 
-    // tfloat: cuBLAS-only for Phase 2A (custom kernel deferred to Phase 2C).
+    // tfloat: register NaiveGemm (custom kernel for comparison vs cuBLAS).
+    // tfloat = tf32 path (TC), not pedantic fp32 (CUDA cores).
     {
         using T = gemm_y::dtypes::tfloat;
         gemm_y::Profiler<T> prof;
+        prof.register_kernel<gemm_y::NaiveGemm<T>>();
         const gemm_y::SweepResult result = prof.run_sweep(kSweepSizes);
 
         const std::string out_csv = "results/bench_" + arch + "_tf32.csv";
         const std::string out_meta = "results/bench_" + arch + "_tf32.meta";
         std::printf("gemm_y: arch=%s dtype=tf32  out=%s\n", arch.c_str(), out_csv.c_str());
         write_csv(result, out_csv);
-        write_meta(out_meta, arch, "tf32", 20, 50, gemm_y::kRelErrTol<T>(), {});
+        std::vector<std::pair<std::string, std::string>> kernels;
+        kernels.emplace_back(std::string(gemm_y::NaiveGemm<T>::name()),
+                             std::string(gemm_y::NaiveGemm<T>::description()));
+        write_meta(out_meta, arch, "tf32", 20, 50, gemm_y::kRelErrTol<T>(), kernels);
         std::printf("gemm_y: done. %zu rows written to %s\n", result.rows.size(), out_csv.c_str());
     }
 

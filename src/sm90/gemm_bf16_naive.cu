@@ -1,4 +1,4 @@
-// gemm_bf16_naive.cu — Hopper (sm_90) naive bf16 GEMM kernel.
+// gemm_bf16_naive.cu — Hopper (sm_90) naive GEMM kernel.
 //
 // Identical to src/sm120/gemm_bf16_naive.cu. Per AGENTS.md and ARD.md §8,
 // arch-specific code lives in separate .cu files (no #ifdef branches);
@@ -54,5 +54,7 @@ void NaiveGemm<T>::operator()(GemmArgs<T> args, cudaStream_t /*stream*/) const {
 }
 
 template struct NaiveGemm<__nv_bfloat16>;
+template struct NaiveGemm<__half>;
+template struct NaiveGemm<float>;
 
 } // namespace gemm_y

@@ -239,19 +239,71 @@ time (use case TBD; captured for traceability).
 
 ---
 
-## Phase 2C — First tiled bf16 kernel (after 2A + 2B)
+## Phase 2C — Naive variants for fp16 / tfloat + tiled kernel (owner: user)
 
-Goal: first tensor-core kernel for bf16, beat cuBLAS at large N. Detailed
-plan in a separate `bf16_tiling_128` branch TODO.
+Goal: give every dtype a custom kernel to compare against cuBLAS, then
+land the first tensor-core tiled kernel for bf16.
 
-- [ ] **2C.1** `src/sm120/gemm_bf16_tiled_128.cu` (+ `.cuh`) — 128×128
-  tile, 8 warps/CTA, `wmma`/`mma.sync` for bf16 on sm_120.
-- [ ] **2C.2** `src/sm90/gemm_bf16_tiled_128.cu` (+ `.cuh`) — same
-  algorithm, sm_90 `wmma` API.
-- [ ] **2C.3** `src/sm120/gemm_fp16_naive.cu` + `src/sm120/gemm_tfloat_naive.cu`
-  (+ sm90 siblings): `NaiveGemm<fp16>` and `NaiveGemm<tfloat>` so the
-  fp16/tfloat sweeps have a custom kernel to compare against cuBLAS.
-  Register in `main.cpp` alongside `NaiveGemm<bf16>`.
+### Done (this session)
+
+- [x] **2C.3** `NaiveGemm<fp16>` and `NaiveGemm<tfloat>` enabled. The
+  `NaiveGemm<T>::operator()` template is dtype-agnostic (casts to fp32
+  for accumulation, back to T on write), so enabling fp16/tfloat was a
+  3-line change: added `template struct NaiveGemm<__half>;` and
+  `template struct NaiveGemm<float>;` explicit instantiations to the
+  existing `src/sm120/gemm_bf16_naive.cu` and `src/sm90/gemm_bf16_naive.cu`
+  (one definition serves all three dtypes — no new files, no duplication).
+  `main.cpp` registers `NaiveGemm<T>` for all three sweeps. Each CSV now
+  has 28 rows (14 sizes × 2 kernels: cuBLAS + naive), all PASS.
+
+### Failed / reverted (this session)
+
+- [ ] **2C.1 / 2C.2** ~~`src/sm120/gemm_bf16_tiled_128.cu` (+ `.cuh`) —
+  128×128 tile, 8 warps/CTA, `nvcuda::wmma` 16×16×16 bf16 fragments, fp32
+  accum.~~ **REVERTED (2026-07-19).** A first attempt at the tiled
+  tensor-core kernel was written and built clean, but failed accuracy:
+  warps 0–3 (rows 0–63) produced correct output; warps 4–7 (rows 64+)
+  produced **zero** output. `max_rel_err = 1.0` at row 64 for N≥128
+  (N=64 passed only because rows 64+ are out of bounds and the zero
+  output happened to match the bounds-skipped store).
+
+  **What was tried (all produced the same failure):**
+  1. Row-major smem A + col-major smem B, `matrix_a` tagged `row_major`.
+     Wrong — the smem layout / fragment tag combination was inconsistent.
+  2. Col-major smem A + col-major smem B, both fragments tagged
+     `col_major`, `ld` matching the col-major stride. Compute should be
+     correct by manual trace, but warps 4–7 still produced zero.
+  3. Per-warp 16×16 accumulator smem slots (avoiding inter-warp races on
+     a shared accumulator buffer). Same failure.
+  4. Full 128×128 accumulator smem (64 KB) with
+     `cudaFuncSetAttribute(cudaFuncAttributeMaxDynamicSharedMemorySize)`
+     to opt in past the 48 KB default. Same failure.
+
+  **Hypothesis:** the bug is not in the store path (multiple store
+  strategies all failed identically) and not in the smem layout (col-major
+  trace is correct). The most likely remaining cause is a misunderstanding
+  of the `nvcuda::wmma` fragment load semantics for warps beyond the first
+  16-row tile — possibly the `matrix_a` fragment load with `ld = kTileM`
+  and a non-zero row base does not do what the manual trace suggests, or
+  there is an undocumented constraint on the `ld` stride for `col_major`
+  fragments. A device-side `printf` of `c_frag[0].x[0..3]` for warp 4 was
+  the next debugging step but was not completed.
+
+  **Files removed:** `src/sm120/gemm_bf16_tiled_128.{cu,cuh}` and
+  `src/sm90/gemm_bf16_tiled_128.{cu,cuh}`. The `<mma.h>` include in
+  `cuda_compat.h` was reverted. `main.cpp` and `tests/test.cu` were
+  reverted to pre-tiled-kernel state. The build is clean and ctest passes
+  (879 checks, 0 failures).
+
+  **Next step (owner: user):** re-attempt the tiled kernel from scratch.
+  Suggested debugging approach: start with a single-CTA, single-warp
+  kernel (16×16×16 output) and confirm correctness, then scale to 8
+  warps (16×128 strip per warp), then scale to the full 128×128 tile.
+  The per-warp isolation will pinpoint whether the bug is in the compute
+  or the store. Alternatively, use `mma.sync` PTX directly instead of
+  `nvcuda::wmma` — the PTX gives explicit control over the fragment
+  layout and may be easier to reason about.
+
 - [ ] **2C.4** Run sweep, ingest to DB, view in dashboard, compare vs
   cuBLAS line. Iterate (one variable per commit per AGENTS.md experiment
   discipline).
