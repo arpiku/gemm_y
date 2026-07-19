@@ -8,6 +8,9 @@ Layout: single page, sidebar + three tabs (Timing / Accuracy / Run History).
 Sidebar filters: arch, dtype, kernel class (Custom/cuBLAS), runs
 multi-select, scale (log-log / linear).
 
+The sidebar's run dropdown is populated once at startup. If you ingest new
+runs while the server is running, restart the server to pick them up.
+
 Usage:
     python scripts/server.py
     python scripts/server.py --port 8050
@@ -68,7 +71,6 @@ def _timing_figure(rows: list[dict], log_log: bool) -> go.Figure:
         rs_sorted = sorted(rs, key=lambda r: r["n"])
         xs = [r["n"] for r in rs_sorted]
         ys = [r["kernel_median_ns"] for r in rs_sorted]
-        ref_ys = [r["ref_kernel_median_ns"] for r in rs_sorted]
         # customdata carries the hover extras.
         customdata = [
             [
@@ -86,6 +88,19 @@ def _timing_figure(rows: list[dict], log_log: bool) -> go.Figure:
         # Label includes run_id so multiple ingests of the same kernel
         # are distinguishable.
         label = f"{kname} (run {run_id})"
+        # Shared hovertemplate — thousands separator on ns values.
+        hovertemplate = (
+            "<b>%{fullData.name}</b><br>"
+            "N=%{x}<br>"
+            "median=%{y:,.0f} ns<br>"
+            "arch=%{customdata[0]}<br>"
+            "dtype=%{customdata[1]}<br>"
+            "class=%{customdata[2]}<br>"
+            "desc=%{customdata[3]}<br>"
+            "ref_median=%{customdata[4]:,.0f} ns<br>"
+            "speedup=%{customdata[5]:.3f}x"
+            "<extra></extra>"
+        )
         if is_cublas:
             fig.add_trace(
                 go.Scatter(
@@ -95,19 +110,9 @@ def _timing_figure(rows: list[dict], log_log: bool) -> go.Figure:
                     name=label,
                     line=dict(color=CUBLAS_COLOR, dash="dash"),
                     marker=dict(color=CUBLAS_COLOR),
+                    opacity=0.6,  # semi-transparent so custom lines show through
                     customdata=customdata,
-                    hovertemplate=(
-                        "<b>%{fullData.name}</b><br>"
-                        "N=%{x}<br>"
-                        "median=%{y:.0f} ns<br>"
-                        "arch=%{customdata[0]}<br>"
-                        "dtype=%{customdata[1]}<br>"
-                        "class=%{customdata[2]}<br>"
-                        "desc=%{customdata[3]}<br>"
-                        "ref_median=%{customdata[4]:.0f} ns<br>"
-                        "speedup=%{customdata[5]:.3f}x"
-                        "<extra></extra>"
-                    ),
+                    hovertemplate=hovertemplate,
                 )
             )
         else:
@@ -122,18 +127,7 @@ def _timing_figure(rows: list[dict], log_log: bool) -> go.Figure:
                     line=dict(color=color),
                     marker=dict(color=color),
                     customdata=customdata,
-                    hovertemplate=(
-                        "<b>%{fullData.name}</b><br>"
-                        "N=%{x}<br>"
-                        "median=%{y:.0f} ns<br>"
-                        "arch=%{customdata[0]}<br>"
-                        "dtype=%{customdata[1]}<br>"
-                        "class=%{customdata[2]}<br>"
-                        "desc=%{customdata[3]}<br>"
-                        "ref_median=%{customdata[4]:.0f} ns<br>"
-                        "speedup=%{customdata[5]:.3f}x"
-                        "<extra></extra>"
-                    ),
+                    hovertemplate=hovertemplate,
                 )
             )
 
@@ -144,35 +138,47 @@ def _timing_figure(rows: list[dict], log_log: bool) -> go.Figure:
         yaxis_title="kernel_median_ns",
         xaxis_type="log" if log_x else "linear",
         yaxis_type="log" if log_y else "linear",
-        legend=dict(orientation="v", x=1.02, y=1, xanchor="right"),
-        margin=dict(l=60, r=20, t=50, b=50),
+        legend=dict(orientation="h", y=-0.2, x=0, xanchor="left"),
+        margin=dict(l=60, r=20, t=50, b=80),
         height=520,
     )
     return fig
 
 
 def _accuracy_figure(rows: list[dict], log_log: bool) -> go.Figure:
-    """max_rel_err vs N per kernel, with a tol line per run."""
+    """max_rel_err vs N per kernel, with a tol line per run.
+
+    When all max_rel_err values are 0 (deterministic fill produces
+    bit-identical output), log-log is degenerate (log(0) = -inf). We
+    clamp the displayed y to a small epsilon for display only — the
+    underlying data is not mutated.
+    """
     fig = go.Figure()
     # Group by (run_id, kernel_name).
     series: dict[tuple[int, str], list[dict]] = {}
     for r in rows:
         series.setdefault((r["run_id"], r["kernel_name"]), []).append(r)
 
+    # Display clamp: if any y is 0, use epsilon for display only.
+    _EPS = 1e-15
+
     color_idx = 0
     for (run_id, kname), rs in series.items():
         rs_sorted = sorted(rs, key=lambda r: r["n"])
         xs = [r["n"] for r in rs_sorted]
-        ys = [r["max_rel_err"] for r in rs_sorted]
+        # Clamp for display only; do not mutate the underlying data.
+        ys = [max(r["max_rel_err"], _EPS) for r in rs_sorted]
         is_cublas = _is_cublas(kname)
         label = f"{kname} (run {run_id})"
         if is_cublas:
             color = CUBLAS_COLOR
             dash = "dash"
+            opacity = 0.6
         else:
             color = OKABE_ITO[color_idx % len(OKABE_ITO)]
             color_idx += 1
             dash = "solid"
+            opacity = 1.0
         fig.add_trace(
             go.Scatter(
                 x=xs,
@@ -181,6 +187,7 @@ def _accuracy_figure(rows: list[dict], log_log: bool) -> go.Figure:
                 name=label,
                 line=dict(color=color, dash=dash),
                 marker=dict(color=color),
+                opacity=opacity,
                 hovertemplate=(
                     "<b>%{fullData.name}</b><br>"
                     "N=%{x}<br>"
@@ -214,16 +221,20 @@ def _accuracy_figure(rows: list[dict], log_log: bool) -> go.Figure:
         yaxis_title="max_rel_err",
         xaxis_type="log" if log_log else "linear",
         yaxis_type="log" if log_log else "linear",
-        legend=dict(orientation="v", x=1.02, y=1, xanchor="right"),
-        margin=dict(l=60, r=20, t=50, b=50),
+        legend=dict(orientation="h", y=-0.2, x=0, xanchor="left"),
+        margin=dict(l=60, r=20, t=50, b=80),
         height=520,
     )
     return fig
 
 
-def _runs_table(rows: list[dict]) -> list[dict]:
+def _runs_table() -> list[dict]:
     """Run history rows for the Dash table."""
-    runs = db.list_runs(db.connect())
+    conn = db.connect()
+    try:
+        runs = db.list_runs(conn)
+    finally:
+        conn.close()
     return [
         {
             "id": r["id"],
@@ -243,11 +254,14 @@ def build_app() -> dash.Dash:
     app.title = "gemm_y dashboard"
 
     conn = db.connect()
-    archs = db.distinct(conn, "arch")
-    dtypes = db.distinct(conn, "dtype")
-    runs = db.list_runs(conn)
+    try:
+        archs = db.distinct(conn, "arch")
+        dtypes = db.distinct(conn, "dtype")
+        runs = db.list_runs(conn)
+    finally:
+        conn.close()
     run_options = [
-        {"label": f"#{r['id']} {r['ingested_at']} {r['arch']}/{r['dtype']}"
+        {"label": f"#{r['id']} {r['arch']}/{r['dtype']}"
                   + (f" [{r['label']}]" if r["label"] else ""),
          "value": r["id"]}
         for r in runs
@@ -338,16 +352,16 @@ def build_app() -> dash.Dash:
 
     @app.callback(
         Output("tab-content", "children"),
-        [Input("tabs", "value"),
-         Input("filter-arch", "value"),
-         Input("filter-dtype", "value"),
-         Input("filter-class", "value"),
-         Input("filter-runs", "value"),
-         Input("filter-scale", "value")],
+        Input("tabs", "value"),
+        Input("filter-arch", "value"),
+        Input("filter-dtype", "value"),
+        Input("filter-class", "value"),
+        Input("filter-runs", "value"),
+        Input("filter-scale", "value"),
     )
     def render_tab(tab, arch, dtypes_sel, classes, run_ids, scale):
         if tab == "runs":
-            rows = _runs_table([])
+            rows = _runs_table()
             return dt.DataTable(
                 columns=[
                     {"name": c, "id": c}
@@ -362,14 +376,17 @@ def build_app() -> dash.Dash:
             )
 
         conn = db.connect()
-        archs_sel = [arch] if arch else None
-        rows = db.fetch_measurements(
-            conn,
-            run_ids=run_ids or None,
-            archs=archs_sel,
-            dtypes=dtypes_sel or None,
-            kernel_classes=classes or None,
-        )
+        try:
+            archs_sel = [arch] if arch else None
+            rows = db.fetch_measurements(
+                conn,
+                run_ids=run_ids or None,
+                archs=archs_sel,
+                dtypes=dtypes_sel or None,
+                kernel_classes=classes or None,
+            )
+        finally:
+            conn.close()
         log_log = scale == "log"
         if tab == "timing":
             return dcc.Graph(figure=_timing_figure(rows, log_log))
