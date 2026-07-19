@@ -5,6 +5,137 @@
 > Do not carry completed items here. Durable project state in `AGENTS.md`;
 > decision rationale in `ARD.md`.
 
+## Phase 1.6 — Copy.h / CudaCheck.h dedup + Profiler D2H fix
+
+Goal: remove code duplication in `Copy.h` and `CudaCheck.h`, tighten the
+error-checking macros, and fix a redundant D2H copy in `Profiler.cu`.
+Refactor only — no behavior change at the public API (`copy_h2d` /
+`copy_d2h` keep their signatures; both `cudaMemcpy` and `cudaMemcpy2D`
+paths are preserved). Driven by code review; precedes Phase 2A.
+
+**Context:**
+- `Copy.h` has two byte-identical `plan_copy` overloads (Space tags
+  swapped) and two near-identical `copy_h2d`/`copy_d2h` bodies (only
+  `cudaMemcpyKind` differs). The Space tags enforce direction at the
+  caller site but are unused in the planning body — the duplication is
+  the symptom of not pushing the Space tag down to a single template
+  parameter and deducing `kind` from it at compile time.
+- `cudaMemcpy2D` IS used: every `copy_d2h` of a `.block(0,0,N,N)` from
+  the 4096-ld pre-alloc buffer takes the strided path for 13 of 14 sweep
+  sizes (only N=4096 is contiguous). Removing it would break the ARD §5
+  pre-alloc + submatrix-slicing design. Keep both paths.
+- `CudaCheck.h` has `GEMM_Y_CUDA_CHECK_IMPL_` (used once, indirection
+  buys nothing) and three macros (`CUDA_CHECK`, `CUDA_CHECK_LAST_ERROR`,
+  `CUBLAS_CHECK`) that each inline the same `fprintf`+`abort` tail.
+
+### CudaCheck.h
+
+- [ ] **1.6.1** Delete `GEMM_Y_CUDA_CHECK_IMPL_`. Add two `[[noreturn]]
+  noexcept` helpers in `namespace gemm_y::detail`:
+  ```cpp
+  [[noreturn]] inline void fail_cuda(cudaError_t e, const char* tag,
+                                     const char* file, int line) noexcept;
+  [[noreturn]] inline void fail_cublas(cublasStatus_t s,
+                                     const char* file, int line) noexcept;
+  ```
+  Each holds the `fprintf`+`abort` tail exactly once. `fail_cuda` is
+  shared by `CUDA_CHECK` and `CUDA_CHECK_LAST_ERROR` (only the tag
+  string differs: `"CUDA error"` vs `"CUDA async error"`).
+- [ ] **1.6.2** Rewrite `CUDA_CHECK`, `CUDA_CHECK_LAST_ERROR`,
+  `CUBLAS_CHECK` as 5-line macros delegating to the `detail::fail_*`
+  helpers. Use fully-qualified `::gemm_y::detail::fail_*` so the macros
+  expand correctly whether used inside or outside `namespace gemm_y`
+  (matches existing usage in `Buffer.h`, `CudaTimer.h`, etc.). Keep the
+  `e_` / `s_` suffix-underscore locals (R20 hygiene).
+  ```cpp
+  #define CUDA_CHECK(expr)                                                            \
+      do {                                                                            \
+          const cudaError_t e_ = (expr);                                              \
+          if (e_ != cudaSuccess)                                                      \
+              ::gemm_y::detail::fail_cuda(e_, "CUDA error", __FILE__, __LINE__);      \
+      } while (0)
+  ```
+- [ ] **1.6.3** Tighten `GEMM_Y_ASSERT` NDEBUG branch to
+  `do { (void)sizeof(cond); } while (0)` — keeps the condition parsed
+  for warnings under NDEBUG (standard `assert` hygiene; current
+  `do { } while (0)` silently drops syntax errors in the condition).
+  Keep the name `GEMM_Y_ASSERT` (project-scoped, only project macro).
+  Debug branch unchanged.
+
+### Copy.h
+
+- [ ] **1.6.4** Collapse the two `plan_copy` overloads into one:
+  ```cpp
+  template <Space Dst, Space Src, typename T, typename U>
+  CopyPlan plan_copy(MatrixView<T, Dst> dst, MatrixView<U, Src> src);
+  ```
+  Body unchanged. Space tags are caller-enforcement only; the body
+  reads `rows`/`cols`/`ld`/`layout`/`is_contiguous()` — Space-agnostic.
+- [ ] **1.6.5** Add `detail::copy_kind_v<Dst, Src>` constexpr table:
+  ```cpp
+  template <Space Dst, Space Src>
+  constexpr cudaMemcpyKind copy_kind_v = cudaMemcpyKind(-1);  // poison
+  template <> constexpr cudaMemcpyKind copy_kind_v<Space::Device, Space::Host> = cudaMemcpyHostToDevice;
+  template <> constexpr cudaMemcpyKind copy_kind_v<Space::Host,   Space::Device> = cudaMemcpyDeviceToHost;
+  ```
+  Other combos intentionally undefined → compile error if used
+  (e.g. `copy` with two Host views won't link, catching misuse).
+- [ ] **1.6.6** Collapse `copy_h2d`/`copy_d2h` bodies into a single
+  `detail::copy(dst, src)` with `kind` deduced via `copy_kind_v`.
+  Delete `copy_contiguous`/`copy_strided` helpers (one-line
+  `CUDA_CHECK` wrappers with no abstraction value); inline the two
+  `CUDA_CHECK` calls directly into `detail::copy`. Both `cudaMemcpy`
+  (contiguous) and `cudaMemcpy2D` (strided) paths preserved.
+  ```cpp
+  template <Space Dst, Space Src, typename T, typename U, /*SFINAE*/>
+  void copy(MatrixView<T, Dst> dst, MatrixView<U, Src> src) {
+      constexpr cudaMemcpyKind kind = copy_kind_v<Dst, Src>;
+      const CopyPlan p = plan_copy(dst, src);
+      if (p.contiguous) {
+          CUDA_CHECK(cudaMemcpy(dst.ptr, src.ptr, p.width_bytes * p.height, kind));
+      } else {
+          CUDA_CHECK(cudaMemcpy2D(dst.ptr, p.dpitch, src.ptr, p.spitch,
+                                  p.width_bytes, p.height, kind));
+      }
+  }
+  ```
+- [ ] **1.6.7** Keep `copy_h2d`/`copy_d2h` as 2-line public wrappers
+  delegating to `detail::copy` — preserves call-site API, no churn in
+  `Profiler.cu` / `test.cu`. Do NOT add `inline` (templates are
+  implicitly inline; the keyword is noise).
+- [ ] **1.6.8** Shape mismatch: keep `fprintf` + `abort` (runtime
+  contract — caller bug, not invariant). Layout mismatch: keep
+  `GEMM_Y_ASSERT` (debug-only — ARD §1 says bench runner guarantees
+  ColMajor, so it's an invariant, not a runtime contract). No change
+  from current behavior; just unified across the single `plan_copy`.
+
+### Profiler.cu
+
+- [ ] **1.6.9** Fix redundant D2H in the debug OOB check
+  (`Profiler.cu` ~line 189). Current code re-copies `dC_ref` to host
+  via `copy_d2h(hC_ref_max.view().block(0,0,N,N), dC_ref)` to verify
+  the custom kernel didn't corrupt `C_ref_max` — but `dC_ref` was
+  already copied to `hC_ref_max` at line 108 in the same N iteration.
+  This is a 2× D2H cost in debug builds. Cache the host snapshot from
+  line 108 (already in `hC_ref_max.view().block(0,0,N,N)`) and reuse
+  it for the OOB comparison instead of re-copying. Behavior
+  (corruption detection) unchanged; debug-build perf improves.
+
+### Validation
+
+- [ ] **1.6.10** Build + test: `cmake -B build && cmake --build build -j
+  && ctest --test-dir build`. Verify no warning regressions under the
+  strict host warning set (`-Wall -Wextra -Wpedantic -Wshadow
+  -Wconversion ...`); verify `-DENABLE_WERROR=ON` still compiles clean.
+- [ ] **1.6.11** Add `test_copy_kind_compile_time` in `test.cu`:
+  `static_assert` that `detail::copy_kind_v<Space::Device, Space::Host>`
+  equals `cudaMemcpyHostToDevice` and the reverse — compile-time
+  guarantee that wrong-direction calls fail to compile (the poison
+  specialization makes `copy<Host, Host>` and `copy<Device, Device>` a
+  compile error).
+
+---
+
 ## Phase 2A — cuBLAS references for all paths
 
 Goal: reference kernels available for all three paths so any custom kernel
