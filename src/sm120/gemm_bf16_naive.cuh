@@ -6,8 +6,7 @@
 // is only declared here and defined in gemm_bf16_naive.cu (a CUDA TU),
 // because it contains the <<<>>> launch syntax that nvcc must compile.
 //
-// Perf-irrelevant — exists only to validate the harness end-to-end
-// (see TODO.md Chunk 5).
+// Perf-irrelevant — exists only to validate the harness end-to-end.
 
 #pragma once
 

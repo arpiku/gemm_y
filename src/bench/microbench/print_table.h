@@ -1,4 +1,4 @@
-// print_table.h — tiny helper for aligned fixed-width column output (R10).
+// print_table.h — tiny helper for aligned fixed-width column output.
 //
 // Microbenches are one-off and human-readable; raw CSV-to-stdout is hard to
 // scan. This helper accumulates rows of strings and prints aligned columns

@@ -3,9 +3,9 @@
 // Returns max_abs_err and max_rel_err. Tolerance threshold is a constexpr
 // so call sites can compare against it without magic numbers.
 //
-// Phase 1 tolerance: 1e-2 (conservative; covers cuBLAS non-determinism
-// across reduction orders). Tighten to 1e-3 in Phase 2 once cuBLAS
-// self-error is characterized (see ARD.md §6).
+// Tolerance: 1e-2 (conservative; covers cuBLAS non-determinism across
+// reduction orders). Tighten once cuBLAS self-error is characterized
+// (see ARD.md §6).
 
 #pragma once
 
@@ -20,7 +20,7 @@
 
 namespace gemm_y {
 
-// Tolerance for Phase 1 (bf16 vs cuBLAS reference).
+// Tolerance for bf16 vs cuBLAS reference.
 constexpr double kRelErrTol = 1e-2;
 
 template <typename T>

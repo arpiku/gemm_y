@@ -4,14 +4,6 @@
 // No external test framework (AGENTS.md spirit: no external deps). A tiny
 // hand-rolled assert macro prints failures and counts them. Returns nonzero
 // from main() if any check failed.
-//
-// Phase 1.5 (R7): removed test_smoke (RAII-violating, redundant — the
-//   round-trip it tested is covered by Copy tests). Trimmed test_buffer_device
-//   to Buffer invariants only (round-trip covered by Copy tests).
-// Phase 1.5 (R8): strengthened test_cuda_timer; added
-//   test_matrixview_const_conversion, test_matrix_view_from_matrix,
-//   test_cublas_gemm_bf16_strided, test_naive_gemm_bf16,
-//   test_profiler_run_sweep_small.
 
 #include <cmath>
 #include <cstdio>
@@ -221,7 +213,7 @@ void test_copy_roundtrip_submatrix() {
 }
 
 // ---------------------------------------------------------------------------
-// Compile-time guarantees for detail::copy_kind_v (Phase 1.6.11)
+// Compile-time guarantees for detail::copy_kind_v
 // ---------------------------------------------------------------------------
 // Wrong-direction instantiations (Host->Host, Device->Device) are rejected
 // by the static_assert inside detail::copy; the poison primary template
@@ -247,7 +239,7 @@ void test_copy_kind_compile_time() {
 }
 
 // ---------------------------------------------------------------------------
-// CudaTimer test (R8: strengthened — assert 0 < ms < 100 after empty kernel)
+// CudaTimer test — assert 0 < ms < 100 after empty kernel
 // ---------------------------------------------------------------------------
 void test_cuda_timer() {
     gemm_y::CudaTimer t;

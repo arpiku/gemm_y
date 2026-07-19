@@ -2,9 +2,8 @@
 //
 // Compiled per arch (alongside the arch-specific kernel directory). The
 // sweep logic is arch-agnostic; only the kernels it dispatches to differ.
-//
-// Phase 1.5 (R3): returns SweepResult instead of writing CSV.
-// Phase 1.5 (R4): cuBLAS measured once per N; ref_* reused for all kernels.
+// run_sweep returns SweepResult (decoupled from CSV I/O); cuBLAS is
+// measured once per N and reused as ref_* for all kernels.
 
 #include "Profiler.h"
 
@@ -56,7 +55,7 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
     // Fill host A, B once with the deterministic pattern.
     bench::fill_sequential<T>(hA_max.view(), hB_max.view());
 
-    // H2D A, B once (timed; reported in every CSV row — R15).
+    // H2D A, B once (timed; reported in every CSV row).
     CudaTimer h2d_timer;
     h2d_timer.start();
     copy_h2d(A_max.view(), hA_max.view());
@@ -83,7 +82,7 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
         auto dC = C_max.view().block(0, 0, N, N);
         auto dC_ref = C_ref_max.view().block(0, 0, N, N);
 
-        // 1) cuBLAS reference -> dC_ref. Warmup + timed. Measured ONCE per N (R4);
+        // 1) cuBLAS reference -> dC_ref. Warmup + timed. Measured ONCE per N;
         //    its kernel_min_ns / kernel_median_ns are reused as ref_* for every
         //    subsequent kernel row at this N.
         bench::TimedStats ref_stats;
@@ -204,7 +203,7 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
             }
         #endif
 
-            // Push the kernel row. ref_* reuse the cuBLAS row's kernel_* (R4).
+            // Push the kernel row. ref_* reuse the cuBLAS row's kernel_*.
             {
                 SweepRow row;
                 row.arch = kArchName;
@@ -245,9 +244,8 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
     return result;
 }
 
-// Explicit instantiations for the dtypes we support in Phase 1+.
-// Phase 1 wires bf16 only; fp16/fp32 are listed so the harness compiles
-// when their kernels are added in Phase 2+.
+// Explicit instantiations for the dtypes we support. bf16 is wired now;
+// fp16/fp32 are listed so the harness compiles when their kernels land.
 template class Profiler<__nv_bfloat16>;
 template class Profiler<__half>;
 template class Profiler<float>;

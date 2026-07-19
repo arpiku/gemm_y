@@ -7,17 +7,14 @@
 // Sync, not async: cudaMemcpyAsync on pageable host memory (which
 // std::vector<T> gives) is silently synchronous — the runtime stages
 // through an internal pinned buffer (extra host-side copy), then issues
-// the DMA. The Phase 1 microbench confirmed sync ≈ async because both
-// are sync; the async path adds staging overhead for no benefit.
-// True async is deferred to Phase 2 prep, where Space::HostPinned +
-// cudaHostAlloc enables real overlap on an explicit stream (ARD §2).
+// the DMA. True async is deferred to Phase 2 prep, where
+// Space::HostPinned + cudaHostAlloc enables real overlap on an explicit
+// stream (ARD §2).
 //
 // Layout must match between src and dst (no transpose). rows/cols must
 // match. The Space tags on src/dst fix the direction (H2D vs D2H) via
-// detail::copy_kind_v<Dst, Src> — a constexpr table that maps the
-// (Dst, Src) Space pair to the cudaMemcpyKind. Wrong-direction
-// instantiations (Host->Host, Device->Device) are rejected by a
-// static_assert inside detail::copy (Phase 1.6.5/1.6.6).
+// detail::copy_kind_v<Dst, Src>. Wrong-direction instantiations are
+// rejected by a static_assert inside detail::copy.
 
 #pragma once
 
@@ -44,10 +41,10 @@ struct CopyPlan {
 };
 
 // constexpr table mapping (Dst, Src) Space pair -> cudaMemcpyKind.
-// Primary template is the poison value (defensive secondary net); only the
+// Primary template is a poison value (defensive secondary net); only the
 // two H2D/D2H specializations are defined. A static_assert inside
 // detail::copy rejects invalid (Dst, Src) pairs at compile time, so the
-// poison value is never reached at runtime (Phase 1.6.5).
+// poison value is never reached at runtime.
 template <Space Dst, Space Src>
 inline constexpr cudaMemcpyKind copy_kind_v = static_cast<cudaMemcpyKind>(-1);
 template <>
@@ -57,10 +54,9 @@ inline constexpr cudaMemcpyKind copy_kind_v<Space::Host,   Space::Device> = cuda
 
 // Validate shapes/layouts and compute the CopyPlan. Aborts on shape
 // mismatch (API contract from caller). Layout mismatch is a debug-only
-// assert (Phase 1 invariant — bench runner guarantees ColMajor).
-//
-// Space-agnostic: the Space tags are caller-enforcement only; the body
-// reads rows/cols/ld/layout/is_contiguous() (Phase 1.6.4).
+// assert (bench runner guarantees ColMajor). Space-agnostic: the Space
+// tags are caller-enforcement only; the body reads
+// rows/cols/ld/layout/is_contiguous().
 template <Space Dst, Space Src, typename T, typename U>
 CopyPlan plan_copy(MatrixView<T, Dst> dst, MatrixView<U, Src> src) {
     if (dst.rows != src.rows || dst.cols != src.cols) {
@@ -87,9 +83,9 @@ CopyPlan plan_copy(MatrixView<T, Dst> dst, MatrixView<U, Src> src) {
 }
 
 // Single copy body shared by copy_h2d / copy_d2h. The cudaMemcpyKind is
-// deduced at compile time from the (Dst, Src) Space pair via copy_kind_v
-// (Phase 1.6.6). Both the cudaMemcpy (contiguous) and cudaMemcpy2D
-// (strided) paths are preserved.
+// deduced at compile time from the (Dst, Src) Space pair via copy_kind_v.
+// Both the cudaMemcpy (contiguous) and cudaMemcpy2D (strided) paths are
+// preserved.
 template <Space Dst, Space Src, typename T, typename U,
           typename = std::enable_if_t<std::is_same_v<U, T> || std::is_same_v<U, const T>>>
 void copy(MatrixView<T, Dst> dst, MatrixView<U, Src> src) {
@@ -112,8 +108,8 @@ void copy(MatrixView<T, Dst> dst, MatrixView<U, Src> src) {
 // Host -> Device.
 // src:  MatrixView<U, Space::Host>      (U = T or const T)
 // dst:  MatrixView<T, Space::Device>
-// 2-line wrapper delegating to detail::copy — preserves call-site API
-// (Phase 1.6.7). No `inline` (templates are implicitly inline).
+// 2-line wrapper delegating to detail::copy — preserves call-site API.
+// No `inline` (templates are implicitly inline).
 template <typename T, typename U,
           typename = std::enable_if_t<std::is_same_v<U, T> || std::is_same_v<U, const T>>>
 void copy_h2d(MatrixView<T, Space::Device> dst,

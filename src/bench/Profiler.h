@@ -8,15 +8,12 @@
 // Stateless K (the common case) fits SBO; stateful K pays one heap alloc,
 // amortized across the full sweep (see ARD.md §4 overhead analysis).
 //
-// Phase 1.5 (R3): run_sweep returns SweepResult — a vector of SweepRow —
-// instead of writing CSV directly. main.cpp owns CsvWriter and iterates
-// result.rows. This decouples bench logic from I/O and makes run_sweep
-// testable in isolation.
-//
-// Phase 1.5 (R4): cuBLAS is measured once per N, stored as the first row
-// per N in SweepResult, and its kernel_min_ns / kernel_median_ns are
-// reused as the ref_* columns for every subsequent kernel row at that N.
-// The Phase 1 implementation re-timed cuBLAS per registered kernel.
+// run_sweep returns SweepResult — a vector of SweepRow — instead of writing
+// CSV directly. main.cpp owns CsvWriter and iterates result.rows. This
+// decouples bench logic from I/O and makes run_sweep testable in isolation.
+// cuBLAS is measured once per N, stored as the first row per N in
+// SweepResult, and its kernel_min_ns / kernel_median_ns are reused as the
+// ref_* columns for every subsequent kernel row at that N.
 
 #pragma once
 
@@ -43,7 +40,7 @@ struct SweepRow {
     int N;
     std::string kernel_name;
     std::string kernel_desc;
-    double h2d_ns;               // global H2D time (A+B), repeated per row (R15)
+    double h2d_ns;               // global H2D time (A+B), repeated per row
     double kernel_min_ns;
     double kernel_median_ns;
     double d2h_ns;

@@ -55,10 +55,9 @@ public:
 
 private:
     // Host Buffer uses std::vector's default allocator, which gives ~16-byte
-    // alignment (sufficient for Phase 1 host-side reference computation).
-    // If a future phase needs explicit 64-byte alignment (e.g. for AVX-512
-    // host-side reference), swap in a custom allocator here without
-    // touching call sites.
+    // alignment (sufficient for host-side reference computation). If a future
+    // phase needs explicit 64-byte alignment (e.g. for AVX-512 host-side
+    // reference), swap in a custom allocator here without touching call sites.
     std::vector<T> storage_;
 };
 

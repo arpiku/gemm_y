@@ -1,8 +1,6 @@
-// memcpy_microbench.cu — Chunk 2.2 (Phase 1.5: relocated to microbench/ subdir).
-//
-// Sweeps H2D / D2H memcpy variants across N in {32,64,128,256,512,1024,
-// 2048,4096} and reports min + median per variant. Warmup=20, timed=50
-// (see ARD.md §11).
+// memcpy_microbench.cu — sweeps H2D / D2H memcpy variants across N in
+// {32,64,128,256,512,1024,2048,4096} and reports min + median per variant.
+// Warmup=20, timed=50 (see ARD.md §11).
 //
 // Variants per direction:
 //   - cudaMemcpy       (sync, contiguous)
@@ -11,9 +9,7 @@
 //
 // Hypothesis: sync vs async identical (no overlap); cudaMemcpy2D is the
 // only correct option for strided submatrix copies. Decision recorded in
-// ARD.md §2.
-//
-// Phase 1.5 (R10): prints a human-readable aligned table instead of raw CSV.
+// ARD.md §2. Prints a human-readable aligned table instead of raw CSV.
 
 #include <string>
 #include <vector>

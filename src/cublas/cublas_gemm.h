@@ -6,7 +6,7 @@
 // CUDA_R_32F (pedantic, CUDA cores).
 //
 // Stream binding is per-call (cublasSetStream), not on the handle — see
-// ARD.md §5.5. Phase 1 uses stream = nullptr (legacy default stream).
+// ARD.md §5.5. Uses stream = nullptr (legacy default stream).
 
 #pragma once
 
@@ -37,17 +37,16 @@ template <> struct CublasTypeMap<float> {
 
 } // namespace detail
 
-// C = A * B  (no transpose, no epilogue). ColMajor only in Phase 1.
+// C = A * B  (no transpose, no epilogue). ColMajor only.
 // A is (m x k), B is (k x n), C is (m x n). All views must be ColMajor.
 //
-// Note: A and B are inputs (read-only in spirit) but are NOT const-ified
-// here. cublas_gemm is a function template, and C++ template argument
-// deduction does not consider implicit conversions — so
-// MatrixView<T,S> -> MatrixView<const T,S> (via MatrixView's converting
-// constructor) would fail deduction at every call site. The const
-// contract is enforced at the GemmArgs level (NaiveGemm and future
-// kernels take GemmArgs<T> with const A/B); cublas_gemm is the
-// reference path and takes writable views for API simplicity.
+// A and B are read-only in spirit but NOT const-ified here: cublas_gemm
+// is a function template, and C++ template argument deduction does not
+// consider implicit conversions, so MatrixView<T,S> -> MatrixView<const T,S>
+// would fail deduction at every call site. The const contract is enforced
+// at the GemmArgs level (NaiveGemm and future kernels take GemmArgs<T>
+// with const A/B); cublas_gemm is the reference path and takes writable
+// views for API simplicity.
 template <typename T>
 void cublas_gemm(CublasHandle& handle,
                  MatrixView<T, Space::Device> A,
@@ -72,13 +71,12 @@ void cublas_gemm(CublasHandle& handle,
     }
     if (A.layout != Layout::ColMajor || B.layout != Layout::ColMajor ||
         C.layout != Layout::ColMajor) {
-        // Phase 1 invariant: all views are ColMajor. The bench runner
-        // guarantees this; a violation is a programming error, not a
-        // runtime API contract. Debug-only assert (R19).
+        // ColMajor invariant: the bench runner guarantees this; a violation
+        // is a programming error, not a runtime API contract. Debug-only assert.
         GEMM_Y_ASSERT(A.layout == Layout::ColMajor &&
                       B.layout == Layout::ColMajor &&
                       C.layout == Layout::ColMajor,
-                      "cublas_gemm: only ColMajor supported in Phase 1");
+                      "cublas_gemm: only ColMajor supported");
     }
 
     using TM = detail::CublasTypeMap<T>;

@@ -2,8 +2,7 @@
 //
 // The CMake-selected arch (sm_90 / sm_120) propagates as a CUDA_ARCH_SM_*
 // preprocessor define. This header maps it to a string for use in CSV rows,
-// log output, and file paths. Previously duplicated in main.cpp, test.cu,
-// and Profiler.cu (R11).
+// log output, and file paths.
 
 #pragma once
 

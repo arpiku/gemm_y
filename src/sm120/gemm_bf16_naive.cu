@@ -3,9 +3,9 @@
 // Triple-loop, 1 thread per C[i][j], inner k loop. ld-aware (reads via
 // ptr + i + k*ld). Accumulate in fp32, cast back to bf16 on write.
 //
-// Perf-irrelevant — exists only to validate the harness end-to-end
-// (see TODO.md Chunk 5). The struct declaration lives in the matching
-// .cuh so main.cpp (a C++ TU) can register it with the Profiler.
+// Perf-irrelevant — exists only to validate the harness end-to-end.
+// The struct declaration lives in the matching .cuh so main.cpp (a C++
+// TU) can register it with the Profiler.
 
 #include "gemm_bf16_naive.cuh"
 
@@ -22,6 +22,7 @@ template <typename T>
 __global__ void naive_gemm_kernel(MatrixView<const T, Space::Device> A,
                                   MatrixView<const T, Space::Device> B,
                                   MatrixView<T,       Space::Device> C) {
+    // MatrixView used as POD descriptor — only ptr/rows/cols/ld are read.
     // 1 thread per C element. Grid covers (rows, cols).
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const int j = blockIdx.y * blockDim.y + threadIdx.y;
@@ -41,9 +42,9 @@ __global__ void naive_gemm_kernel(MatrixView<const T, Space::Device> A,
 
 template <typename T>
 void NaiveGemm<T>::operator()(GemmArgs<T> args, cudaStream_t /*stream*/) const {
-    // Debug-only ColMajor invariant (Phase 1.7.5). The kernel hardcodes
-    // ColMajor addressing; a RowMajor view would produce wrong results
-    // silently. One assert per launch (host-side), zero Release cost.
+    // Debug-only ColMajor invariant. The kernel hardcodes ColMajor
+    // addressing; a RowMajor view would produce wrong results silently.
+    // One assert per launch (host-side), zero Release cost.
     GEMM_Y_ASSERT(args.A.layout == Layout::ColMajor &&
                   args.B.layout == Layout::ColMajor &&
                   args.C.layout == Layout::ColMajor,
@@ -58,8 +59,8 @@ void NaiveGemm<T>::operator()(GemmArgs<T> args, cudaStream_t /*stream*/) const {
         args.A, args.B, args.C);
 }
 
-// Explicit instantiation for the bf16 dtype (Phase 1). Instantiating the
-// struct emits all member definitions (including operator()).
+// Explicit instantiation for the bf16 dtype. Instantiating the struct
+// emits all member definitions (including operator()).
 template struct NaiveGemm<__nv_bfloat16>;
 
 } // namespace gemm_y

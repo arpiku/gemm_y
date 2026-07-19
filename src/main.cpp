@@ -1,11 +1,11 @@
 // main.cpp — gemm_y entry point.
 //
-// Phase 1.5: Profiler::run_sweep returns a SweepResult; main.cpp owns the
-// CsvWriter and iterates result.rows to write the CSV. This decouples bench
-// logic from I/O (R3).
+// Profiler::run_sweep returns a SweepResult; main.cpp owns the CsvWriter
+// and iterates result.rows to write the CSV. This decouples bench logic
+// from I/O.
 //
-// Phase 1: hardcode the bf16 sweep (no argparse dependency). Registers the
-// naive bf16 kernel and runs the full size sweep, writing CSV to
+// Hardcode the bf16 sweep (no argparse dependency). Registers the naive
+// bf16 kernel and runs the full size sweep, writing CSV to
 // results/bench_<arch>_bf16.csv.
 
 #include <cstdio>
@@ -25,7 +25,7 @@
 
 namespace {
 
-// Write a SweepResult to a CSV file. Schema is defined here (one place — R3).
+// Write a SweepResult to a CSV file. Schema is defined here (one place).
 void write_csv(const gemm_y::SweepResult& result, const std::string& path) {
     gemm_y::CsvWriter csv;
     if (!csv.open(path)) {

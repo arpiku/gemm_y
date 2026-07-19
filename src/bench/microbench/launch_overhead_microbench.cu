@@ -1,10 +1,7 @@
-// launch_overhead_microbench.cu — Chunk 2.4 (Phase 1.5: relocated to microbench/ subdir).
-//
-// Measures per-launch overhead of an empty kernel via CudaTimer. Sets the
-// floor for kernel time interpretation (a kernel reporting < launch overhead
-// is measurement noise). Documented in ARD.md.
-//
-// Phase 1.5 (R10): prints a human-readable aligned table.
+// launch_overhead_microbench.cu — measures per-launch overhead of an empty
+// kernel via CudaTimer. Sets the floor for kernel time interpretation (a
+// kernel reporting < launch overhead is measurement noise). Documented in
+// ARD.md. Prints a human-readable aligned table.
 
 #include <string>
 #include <vector>

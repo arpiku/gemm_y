@@ -1,5 +1,13 @@
 // MatrixView.h — non-owning {ptr, rows, cols, ld, layout} view over a matrix.
 //
+// Dual-use contract:
+//   (1) Host-side view: block() / operator() / is_contiguous() / the
+//       const-converting ctor are host-only utilities for slicing and
+//       reference computation. They are NOT __device__-callable.
+//   (2) Kernel-side POD descriptor: kernels receive MatrixView by value
+//       and read ptr / rows / cols / ld directly. The host methods are
+//       never called from device code.
+//
 // POD, pass-by-value (fits registers, no aliasing). Works for both T and
 // const T (mirrors std::span semantics): MatrixView<const T, S> is the
 // "read-only" view returned by const Matrix.
@@ -9,7 +17,7 @@
 // allocate a single 4096x4096 buffer and feed N x N submatrices to every
 // kernel without copying (see ARD.md §5).
 //
-// ld semantics (ColMajor, the Phase 1 default):
+// ld semantics (ColMajor, the default):
 //   - ld >= rows is the leading dimension (stride between contiguous columns).
 //   - element (i,j) lives at ptr + i + j*ld.
 //   - is_contiguous() iff ld == rows.
@@ -55,7 +63,8 @@ struct MatrixView {
           ld(other.ld), layout(other.layout) {}
 
     // Zero-copy sub-view at offset (r,c) of size m x n. ld is unchanged.
-    // Debug-only bounds asserts catch silent OOB if misused (R18).
+    // block(row, col, rows, cols) — BLAS convention. Debug-only bounds
+    // asserts catch silent OOB if misused.
     [[nodiscard]] MatrixView<T, S> block(int r, int c, int m, int n) const noexcept {
         GEMM_Y_ASSERT(r >= 0 && c >= 0 && m >= 0 && n >= 0,
                       "block(): negative args");

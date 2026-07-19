@@ -1,4 +1,4 @@
-// Stats.h — min/median summary of cudaEvent timing samples (R12).
+// Stats.h — min/median summary of cudaEvent timing samples.
 //
 // Both Profiler.cu and the microbenches need to reduce a vector of
 // per-iteration elapsed-ms samples to {min_ns, median_ns}. Extracted here

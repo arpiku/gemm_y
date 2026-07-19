@@ -146,6 +146,67 @@ Small, surgical phase; no algorithm or perf work.
 
 ---
 
+## Phase 1.8 — Comment clarity pass (no logic change)
+
+Goal: address the `MatrixView` opacity concern with a documented
+dual-use contract; trim verbose comments and phase trailers
+(`Phase X.Y`, `RXX`, `Chunk X.X`) across the codebase. Comment-only —
+zero code logic changes, zero behavior change. `Layout` enum kept
+(future RowMajor); `MatrixView` type unchanged (no split, no rename,
+no field changes); `Tracer.h` kept; ColMajor asserts (1.7.5) kept;
+`copy_kind_v` poison primary + `static_assert` kept (machinery correct).
+
+### Additions (clarity)
+
+- [x] **1.8.1** `MatrixView.h` header: add a dual-use contract comment.
+  The type serves (1) host-side view (with `block`/`operator()`/
+  `is_contiguous`/converting ctor) and (2) kernel-side POD descriptor
+  (only `ptr`/`rows`/`cols`/`ld` read directly). Explicitly note the
+  host methods are **not** `__device__`-callable; kernels read fields
+  directly. Makes the "opaque properties" concern explicit at the type
+  definition.
+- [x] **1.8.2** `MatrixView.h::block`: one-line arg-order comment —
+  `// block(row, col, rows, cols) — BLAS convention; ld is unchanged.`
+- [x] **1.8.3** `NaiveGemm` sm90 + sm120 `.cu`: one-line comment at
+  `naive_gemm_kernel` signature — `// MatrixView used as POD descriptor
+  — only ptr/rows/cols/ld are read.`
+
+### Removals (verbosity + phase trailers)
+
+- [x] **1.8.4** `CudaCheck.h`: trim header from ~20 lines to ~10 (one
+  layer of explanation, not three). Drop per-helper comments that
+  restate the function body. Drop `Phase 1.6.x` trailers.
+- [x] **1.8.5** `Copy.h`: drop all `Phase 1.6.x` trailers. Trim
+  `copy_kind_v`/`plan_copy`/`copy` comments to essentials. Keep the
+  machinery (poison primary + `static_assert`), just less prose.
+- [x] **1.8.6** `cublas_gemm.h`: trim 8-line const-ification note to
+  ~4 lines. Trim the `Phase 1 invariant` comment on the layout check.
+- [x] **1.8.7** `CMakeLists.txt`: trim `-Werror` comment from 6 lines
+  to 3. Drop `Phase 1.7.1` trailers from CTest comments.
+- [x] **1.8.8** `test.cu`: trim `test_copy_kind_compile_time` block
+  comment. Drop phase trailers from file header.
+- [x] **1.8.9** `Profiler.cu` + `Profiler.h`: drop `Phase 1.5 (R3)`/
+  `Phase 1.5 (R4)`/`R15` trailers. Keep durable explanations.
+- [x] **1.8.10** `NaiveGemm` sm90 + sm120 `.cu`: drop `Phase 1.7.5`
+  trailers from ColMajor assert comments. Keep rationale (one line).
+- [x] **1.8.11** Sweep remaining files for `RXX`/`Phase X.Y`/
+  `Chunk X.X` trailers; trim where they add no durable value. Rule:
+  drop the trailer tag, keep the durable explanation. Files:
+  `Buffer.h`, `bench/Stats.h` (R12), `bench/Fill.h` (R13),
+  `bench/Accuracy.h` (Phase 1/2 refs), `bench/microbench/
+  memcpy_microbench.cu` (Chunk 2.2, Phase 1.5 R10),
+  `bench/microbench/launch_overhead_microbench.cu` (Chunk 2.4, R10),
+  `bench/microbench/print_table.h` (R10), `main.cpp` (Phase 1.5/Phase 1),
+  `Arch.h` (R11).
+
+### Validation
+
+- [x] **1.8.12** Build + ctest: `cmake -B build && cmake --build build -j
+  && ctest --test-dir build`. Verify all 875 checks still pass.
+  Comment-only change; build should be a no-op.
+
+---
+
 ## Phase 2A — cuBLAS references for all paths
 
 Goal: reference kernels available for all three paths so any custom kernel

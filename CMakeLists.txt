@@ -58,10 +58,8 @@ message(STATUS "gemm_y: CUDA arch = ${GEMM_Y_CUDA_ARCH} "
 # ---------------------------------------------------------------------------
 # Note: -Werror is intentionally NOT supported. nvcc's -Werror requires a
 # <kind> argument (e.g. -Werror all-warnings); the bare -Werror form greedily
-# consumes the next flag as its kind, breaking the build. The host-only
-# -Werror path was the only one that worked, and it was deemed not worth the
-# complexity of maintaining two code paths. Rely on the strict warning set
-# below and CI/local vigilance instead.
+# consumes the next flag as its kind, breaking the build. Rely on the strict
+# warning set below and CI/local vigilance instead.
 
 # Host-compiler warnings applied to pure CXX sources.
 set(_gemm_y_host_warnings
@@ -195,8 +193,8 @@ target_include_directories(test_cuda PRIVATE src)
 target_link_libraries(test_cuda PRIVATE CUDA::cublas)
 gemm_y_apply_common_flags(test_cuda)
 
-# Register test_cuda with CTest (Phase 1.7.1). The binary's main() returns
-# EXIT_FAILURE on any CHECK failure, so the exit code propagates directly.
+# Register test_cuda with CTest. The binary's main() returns EXIT_FAILURE
+# on any CHECK failure, so the exit code propagates directly.
 add_test(NAME test_cuda COMMAND test_cuda)
 
 # ---------------------------------------------------------------------------
