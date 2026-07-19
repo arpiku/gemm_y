@@ -212,6 +212,34 @@ Do not load `ARD.md` in full unless reviewing a specific decision.
   and greedily consumes the next flag as its value, breaking the build).
   Rely on the strict warning set compiled in by default.
 
+### Python / Dash
+- **Dash callback signature**: use the flat form — one `Input(...)` per
+  argument, no list wrapping. The list-wrapped form
+  (`[Input(...), Input(...)]`) is interpreted by Dash 4.x as a wildcard
+  multi-output, which expects a list/tuple return value and raises
+  `InvalidCallbackReturnValue` when the callback returns a single
+  component. The flat form works across Dash 2.x/3.x/4.x.
+  ```python
+  # Correct (flat):
+  @app.callback(
+      Output("tab-content", "children"),
+      Input("tabs", "value"),
+      Input("filter-arch", "value"),
+  )
+  def render_tab(tab, arch): ...
+
+  # Wrong (list-wrapped — breaks on Dash 4.x):
+  @app.callback(
+      Output("tab-content", "children"),
+      [Input("tabs", "value"),
+       Input("filter-arch", "value")],
+  )
+  ```
+- **Dashboard validation**: a `GET /` returning HTTP 200 only confirms
+  the static layout serves. Always fire a real callback POST (tab switch,
+  filter change) to verify the interactive layer — either via browser
+  devtools or `curl -X POST localhost:8050/_dash-update-component`.
+
 ## Benchmarking Protocol
 
 ### Matrix Size Sweep

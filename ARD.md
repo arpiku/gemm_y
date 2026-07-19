@@ -640,6 +640,19 @@ for 32-bit float storage.
 - `scripts/dump_db.py` — optional JSONL export for human inspection.
 - `pyenv/` venv (Python 3.14) for all scripts.
 
+**Dash 4.x callback convention (Phase 2B.1 fix):** the callback
+signature must use the flat form — one `Input(...)` per argument, no
+list wrapping. The list-wrapped form (`[Input(...), Input(...)]`) is
+interpreted by Dash 4.x as a wildcard multi-output, which expects a
+list/tuple return value and raises `InvalidCallbackReturnValue` when
+the callback returns a single component. The flat form works across
+Dash 2.x/3.x/4.x. See AGENTS.md "Python / Dash" for the code pattern.
+
+**Dashboard validation discipline:** a `GET /` returning HTTP 200 only
+confirms the static layout serves. Always fire a real callback POST
+(tab switch, filter change) to verify the interactive layer — either
+via browser devtools or `curl -X POST localhost:8050/_dash-update-component`.
+
 ### 12.4 Phase 2C — First tiled bf16 kernel (after 2A + 2B)
 - `src/sm120/gemm_bf16_tiled_128.cu` (+ `.cuh`) — 128×128 tile, 8 warps/CTA,
   `wmma`/`mma.sync` for bf16 on sm_120.
