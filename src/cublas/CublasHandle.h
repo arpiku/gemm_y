@@ -54,4 +54,36 @@ private:
     cublasHandle_t handle_ = nullptr;
 };
 
+// RAII guard for cuBLAS math mode. Captures the current mode via
+// cublasGetMathMode, sets a new mode in the ctor, and restores the
+// previous mode in the dtor. Used by cublas_gemm to apply
+// CublasTypeMap<T>::math_mode per call (see ARD §9).
+//
+// Non-thread-safe: the math mode is handle state, so concurrent calls on
+// the same handle with different modes would race. Bench is single-
+// threaded; if multi-threaded bench ever lands, one handle per thread.
+// Non-copyable, non-movable (the dtor must run exactly once per guard).
+class CublasMathModeGuard {
+public:
+    CublasMathModeGuard(cublasHandle_t h, cublasMath_t new_mode) : handle_(h) {
+        CUBLAS_CHECK(cublasGetMathMode(handle_, &prev_));
+        CUBLAS_CHECK(cublasSetMathMode(handle_, new_mode));
+    }
+
+    ~CublasMathModeGuard() {
+        if (handle_ != nullptr) {
+            (void)cublasSetMathMode(handle_, prev_);
+        }
+    }
+
+    CublasMathModeGuard(const CublasMathModeGuard&) = delete;
+    CublasMathModeGuard& operator=(const CublasMathModeGuard&) = delete;
+    CublasMathModeGuard(CublasMathModeGuard&&) = delete;
+    CublasMathModeGuard& operator=(CublasMathModeGuard&&) = delete;
+
+private:
+    cublasHandle_t handle_ = nullptr;
+    cublasMath_t prev_ = CUBLAS_DEFAULT_MATH;
+};
+
 } // namespace gemm_y

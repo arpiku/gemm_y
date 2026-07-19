@@ -34,41 +34,48 @@ custom kernel variant can be benchmarked against the right baseline.
 
 ### C++ changes
 
-- [ ] **2A.1** `src/dtypes.h`: add `using tfloat = float;` alias with
+- [x] **2A.1** `src/dtypes.h`: add `using tfloat = float;` alias with
   inline comment explaining the tf32-only intent. Change
   `name<float>()` to return `"tf32"`. Drop the `fp32` name (no pedantic
   path). Document the alias in ARD §9.
-- [ ] **2A.2** `src/cublas/cublas_gemm.h`: extend `CublasTypeMap<T>` with
+- [x] **2A.2** `src/cublas/cublas_gemm.h`: extend `CublasTypeMap<T>` with
   a `static constexpr cublasMath_t math_mode` field per specialization:
   - `bf16` → `CUBLAS_DEFAULT_MATH`
   - `fp16` → `CUBLAS_DEFAULT_MATH`
-  - `float` (tfloat) → `CUBLAS_TF32_CUBLAS_MATH`
+  - `float` (tfloat) → `CUBLAS_TF32_TENSOR_OP_MATH`
   Update the `cublas_gemm` body to construct a `CublasMathModeGuard`
   around the `cublasGemmEx` call. No distinct `cublas_gemm_tf32` entry
   point — the math mode is selected by `CublasTypeMap<T>::math_mode`.
-- [ ] **2A.3** `src/cublas/CublasHandle.h`: add free class
+
+  **Implementation note (2026-07-19):** ARD §9 / AGENTS.md / TODO all
+  reference `CUBLAS_TF32_CUBLAS_MATH`, but the actual constant in
+  CUDA 13.2's `cublas_api.h` is `CUBLAS_TF32_TENSOR_OP_MATH` (enum
+  value 3). `CUBLAS_TF32_CUBLAS_MATH` does not exist. Used
+  `CUBLAS_TF32_TENSOR_OP_MATH`. ARD/AGENTS.md should be updated to
+  reflect the real constant name.
+- [x] **2A.3** `src/cublas/CublasHandle.h`: add free class
   `CublasMathModeGuard` (ctor captures prev mode via
   `cublasGetMathMode`, sets new mode; dtor restores prev). Non-copyable,
   non-movable. Used by `cublas_gemm`.
-- [ ] **2A.4** `src/bench/Accuracy.h`: replace the single global
+- [x] **2A.4** `src/bench/Accuracy.h`: replace the single global
   `kRelErrTol` constant with `template <typename T> constexpr double
   kRelErrTol<T>()` specializations:
   - `bf16`  → `1e-2`
   - `fp16`  → `1e-3`
   - `tfloat`→ `1e-3`
   Keep `compare<T>(ref, got)` returning `ErrReport<T>` unchanged.
-- [ ] **2A.5** `src/bench/Profiler.cu`: in `run_sweep`, after
-  `compare<T>(...)`, check `err.max_rel > kRelErrTol<T>`. If true:
+- [x] **2A.5** `src/bench/Profiler.cu`: in `run_sweep`, after
+  `compare<T>(...)`, check `err.max_rel > kRelErrTol<T>()`. If true:
   print stderr FAIL message with N, kernel name, rel_err, tol; **skip
   the row** (`continue` to next kernel). Do not write the SweepRow.
   Passing kernels write the row as before. cuBLAS reference rows are
   always written (ground truth, err == 0).
-- [ ] **2A.6** `src/main.cpp`: extend to run three sequential sweeps
+- [x] **2A.6** `src/main.cpp`: extend to run three sequential sweeps
   (bf16, fp16, tfloat). Each sweep: construct `Profiler<T>`, register
   `NaiveGemm<T>` (bf16 only — fp16/tfloat register cuBLAS-only for 2A),
   call `run_sweep`, write CSV + `.meta` sidecar. One `(arch, dtype)`
   pair per CSV. Use explicit blocks (no template metaprogramming).
-- [ ] **2A.7** `src/main.cpp`: add `write_meta()` helper that writes a
+- [x] **2A.7** `src/main.cpp`: add `write_meta()` helper that writes a
   simple key=value sidecar file `results/bench_<arch>_<dtype>.meta`
   alongside the CSV. Format:
   ```
@@ -91,20 +98,22 @@ custom kernel variant can be benchmarked against the right baseline.
 
 ### Tests
 
-- [ ] **2A.8** `tests/test.cu`: add `test_cublas_gemm_fp16` and
+- [x] **2A.8** `tests/test.cu`: add `test_cublas_gemm_fp16` and
   `test_cublas_gemm_tfloat`. Each: small GEMM (e.g. N=64), compare
   cuBLAS output vs a host-computed fp64 reference, assert
-  `max_rel_err <= kRelErrTol<T>`. The tfloat test must additionally
+  `max_rel_err <= kRelErrTol<T>()`. The tfloat test must additionally
   verify math-mode restore: capture mode before, run `cublas_gemm<float>`,
   capture mode after, assert unchanged (i.e. `CublasMathModeGuard`
   restored to `CUBLAS_DEFAULT_MATH`).
 
 ### Validation
 
-- [ ] **2A.9** Build + ctest: `cmake -B build && cmake --build build -j
+- [x] **2A.9** Build + ctest: `cmake -B build && cmake --build build -j
   && ctest --test-dir build`. All existing checks still pass; new fp16
-  + tfloat cuBLAS tests pass.
-- [ ] **2A.10** `./build/gemm_y` end-to-end: three sweeps run (bf16,
+  + tfloat cuBLAS tests pass. (879 checks, 0 failures — up from 875;
+  the 4 new checks are the math-mode restore assertions in
+  `test_cublas_gemm_tfloat`.)
+- [x] **2A.10** `./build/gemm_y` end-to-end: three sweeps run (bf16,
   fp16, tf32), three CSVs + three `.meta` sidecars written to
   `results/`. bf16 sweep produces 28 rows as before; fp16 and tf32
   sweeps produce 14 rows each (cuBLAS only — no custom kernel

@@ -1,9 +1,10 @@
 // cublas_gemm.h — thin wrapper around cublasGemmEx.
 //
 // Implicit alpha=1, beta=0 (AGENTS.md non-goal: epilogue fusion). computeType
-// is CUDA_R_32F for bf16/fp16 inputs (fp32 accumulation, cuBLAS default —
-// natural ground truth for our kernels). For fp32 inputs, computeType is
-// CUDA_R_32F (pedantic, CUDA cores).
+// is CUDA_R_32F for all paths (fp32 accumulation). The math mode is selected
+// per dtype via CublasTypeMap<T>::math_mode: bf16/fp16 use CUBLAS_DEFAULT_MATH
+// (tensor cores, fp32 accum); tfloat uses CUBLAS_TF32_CUBLAS_MATH (tf32 TC).
+// The pedantic fp32 / CUDA-core path is dropped — see ARD §9.
 //
 // Stream binding is per-call (cublasSetStream), not on the handle — see
 // ARD.md §5.5. Uses stream = nullptr (legacy default stream).
@@ -19,20 +20,24 @@ namespace gemm_y {
 
 namespace detail {
 
-// Maps a host dtype T -> cublas compute type + data type.
-// bf16/fp16 accumulate in fp32 (CUDA_R_32F); fp32 is pedantic (CUDA_R_32F).
+// Maps a host dtype T -> cublas data type, compute type, and math mode.
+// bf16/fp16: tensor cores, fp32 accum, DEFAULT_MATH.
+// tfloat:    tf32 tensor cores, fp32 accum, TF32_CUBLAS_MATH (see ARD §9).
 template <typename T> struct CublasTypeMap;
 template <> struct CublasTypeMap<__nv_bfloat16> {
-    static constexpr cudaDataType_t data_type = CUDA_R_16BF;
+    static constexpr cudaDataType_t data_type    = CUDA_R_16BF;
     static constexpr cudaDataType_t compute_type = CUDA_R_32F;
+    static constexpr cublasMath_t   math_mode    = CUBLAS_DEFAULT_MATH;
 };
 template <> struct CublasTypeMap<__half> {
-    static constexpr cudaDataType_t data_type = CUDA_R_16F;
+    static constexpr cudaDataType_t data_type    = CUDA_R_16F;
     static constexpr cudaDataType_t compute_type = CUDA_R_32F;
+    static constexpr cublasMath_t   math_mode    = CUBLAS_DEFAULT_MATH;
 };
 template <> struct CublasTypeMap<float> {
-    static constexpr cudaDataType_t data_type = CUDA_R_32F;
+    static constexpr cudaDataType_t data_type    = CUDA_R_32F;
     static constexpr cudaDataType_t compute_type = CUDA_R_32F;
+    static constexpr cublasMath_t   math_mode    = CUBLAS_TF32_TENSOR_OP_MATH;
 };
 
 } // namespace detail
@@ -84,6 +89,10 @@ void cublas_gemm(CublasHandle& handle,
     const float beta = 0.0f;
 
     CUBLAS_CHECK(cublasSetStream(handle.get(), stream));
+    // Apply the per-dtype math mode for this call and restore the previous
+    // mode on exit. For bf16/fp16 this is a no-op (DEFAULT_MATH -> DEFAULT_MATH);
+    // for tfloat it sets TF32_CUBLAS_MATH and restores DEFAULT_MATH.
+    CublasMathModeGuard guard(handle.get(), TM::math_mode);
     CUBLAS_CHECK(cublasGemmEx(
         handle.get(),
         CUBLAS_OP_N, CUBLAS_OP_N,

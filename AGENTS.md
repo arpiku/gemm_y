@@ -38,7 +38,7 @@ on Hopper (sm_90) and Blackwell (sm_120), for `bf16`, `fp16`, and `tf32`.
 ## Tech Stack (Continued)  
 - **cuBLAS** - v2 (CUDA 12.8) to be used
 - **Reference comparison**: compare against `cublasGemmEx` fist, then the goal post will shift to beating `cublasLtMatmul` (the newer, lower-level API) 
-- **Dtypes**: `bf16` and `fp16` target Tensor Cores by default (fp32 accum). `tfloat = float` is the tf32 path (TC, `CUBLAS_TF32_CUBLAS_MATH`); no pedantic fp32 / CUDA-core path. See ARD §9.
+- **Dtypes**: `bf16` and `fp16` target Tensor Cores by default (fp32 accum). `tfloat = float` is the tf32 path (TC, `CUBLAS_TF32_TENSOR_OP_MATH`); no pedantic fp32 / CUDA-core path. See ARD §9.
 - **Python tooling**: Plotly + Dash + SQLite for the benchmark dashboard. venv at `pyenv/` (Python 3.14). See "Python tooling" under Build Commands.
 
 ## Build Commands
@@ -157,7 +157,7 @@ Do not load `ARD.md` in full unless reviewing a specific decision.
   path is dropped entirely — only the tf32 tensor-core path is implemented
   for 32-bit float storage. See ARD §9.
 - **`CublasTypeMap<T>::math_mode`** selects the cuBLAS math mode per
-  dtype: `CUBLAS_DEFAULT_MATH` for bf16/fp16, `CUBLAS_TF32_CUBLAS_MATH`
+  dtype: `CUBLAS_DEFAULT_MATH` for bf16/fp16, `CUBLAS_TF32_TENSOR_OP_MATH`
   for tfloat. `cublas_gemm` wraps the call in `CublasMathModeGuard` — no
   distinct `cublas_gemm_tf32` entry point.
 

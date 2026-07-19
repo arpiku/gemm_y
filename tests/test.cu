@@ -446,6 +446,122 @@ void test_naive_gemm_bf16() {
     CHECK(max_rel <= 1e-3);
 }
 
+// fp16 cuBLAS vs host fp64 reference. fp16 has a 10-bit mantissa; cuBLAS
+// fp16 (tensor cores, fp32 accum) should agree with fp64 to ~1e-4.
+void test_cublas_gemm_fp16() {
+    using T = gemm_y::dtypes::fp16;
+    constexpr int N = 64;
+    gemm_y::Matrix<T, gemm_y::Space::Host> hA = gemm_y::Matrix<T, gemm_y::Space::Host>::alloc(N, N);
+    gemm_y::Matrix<T, gemm_y::Space::Host> hB = gemm_y::Matrix<T, gemm_y::Space::Host>::alloc(N, N);
+    gemm_y::Matrix<T, gemm_y::Space::Host> hC = gemm_y::Matrix<T, gemm_y::Space::Host>::alloc(N, N);
+
+    gemm_y::bench::fill_sequential<T>(hA.view(), hB.view());
+
+    // Host fp64 reference: naive triple loop, accumulate in double.
+    std::vector<double> ref(static_cast<std::size_t>(N) * static_cast<std::size_t>(N), 0.0);
+    for (int j = 0; j < N; ++j) {
+        for (int i = 0; i < N; ++i) {
+            double acc = 0.0;
+            for (int k = 0; k < N; ++k) {
+                const double a = static_cast<double>(hA.view()(i, k));
+                const double b = static_cast<double>(hB.view()(k, j));
+                acc += a * b;
+            }
+            ref[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * N] = acc;
+        }
+    }
+
+    gemm_y::Matrix<T, gemm_y::Space::Device> dA = gemm_y::Matrix<T, gemm_y::Space::Device>::alloc(N, N);
+    gemm_y::Matrix<T, gemm_y::Space::Device> dB = gemm_y::Matrix<T, gemm_y::Space::Device>::alloc(N, N);
+    gemm_y::Matrix<T, gemm_y::Space::Device> dC = gemm_y::Matrix<T, gemm_y::Space::Device>::alloc(N, N);
+
+    gemm_y::copy_h2d(dA.view(), hA.view());
+    gemm_y::copy_h2d(dB.view(), hB.view());
+
+    gemm_y::CublasHandle handle;
+    gemm_y::cublas_gemm(handle, dA.view(), dB.view(), dC.view());
+
+    gemm_y::copy_d2h(hC.view(), dC.view());
+
+    double max_abs = 0.0, max_rel = 0.0;
+    for (int j = 0; j < N; ++j) {
+        for (int i = 0; i < N; ++i) {
+            const double g = static_cast<double>(hC.view()(i, j));
+            const double r = ref[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * N];
+            const double abs_err = std::fabs(g - r);
+            const double denom = std::fmax(std::fabs(r), 1e-9);
+            const double rel_err = abs_err / denom;
+            if (abs_err > max_abs) max_abs = abs_err;
+            if (rel_err > max_rel) max_rel = rel_err;
+        }
+    }
+    std::printf("[test_cublas_gemm_fp16] max_abs=%.3e max_rel=%.3e\n", max_abs, max_rel);
+    CHECK(max_rel <= gemm_y::kRelErrTol<T>());
+}
+
+// tfloat (tf32) cuBLAS vs host fp64 reference. tf32 truncates the fp32
+// mantissa to 10 bits; cuBLAS tf32 (tensor cores, fp32 accum) should agree
+// with fp64 to ~1e-4. Also verifies the math mode is restored after the
+// call (CublasMathModeGuard must restore CUBLAS_DEFAULT_MATH).
+void test_cublas_gemm_tfloat() {
+    using T = gemm_y::dtypes::tfloat;  // tfloat = tf32 path (TC), not pedantic fp32 (CUDA cores).
+    constexpr int N = 64;
+    gemm_y::Matrix<T, gemm_y::Space::Host> hA = gemm_y::Matrix<T, gemm_y::Space::Host>::alloc(N, N);
+    gemm_y::Matrix<T, gemm_y::Space::Host> hB = gemm_y::Matrix<T, gemm_y::Space::Host>::alloc(N, N);
+    gemm_y::Matrix<T, gemm_y::Space::Host> hC = gemm_y::Matrix<T, gemm_y::Space::Host>::alloc(N, N);
+
+    gemm_y::bench::fill_sequential<T>(hA.view(), hB.view());
+
+    // Host fp64 reference: naive triple loop, accumulate in double.
+    std::vector<double> ref(static_cast<std::size_t>(N) * static_cast<std::size_t>(N), 0.0);
+    for (int j = 0; j < N; ++j) {
+        for (int i = 0; i < N; ++i) {
+            double acc = 0.0;
+            for (int k = 0; k < N; ++k) {
+                const double a = static_cast<double>(hA.view()(i, k));
+                const double b = static_cast<double>(hB.view()(k, j));
+                acc += a * b;
+            }
+            ref[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * N] = acc;
+        }
+    }
+
+    gemm_y::Matrix<T, gemm_y::Space::Device> dA = gemm_y::Matrix<T, gemm_y::Space::Device>::alloc(N, N);
+    gemm_y::Matrix<T, gemm_y::Space::Device> dB = gemm_y::Matrix<T, gemm_y::Space::Device>::alloc(N, N);
+    gemm_y::Matrix<T, gemm_y::Space::Device> dC = gemm_y::Matrix<T, gemm_y::Space::Device>::alloc(N, N);
+
+    gemm_y::copy_h2d(dA.view(), hA.view());
+    gemm_y::copy_h2d(dB.view(), hB.view());
+
+    gemm_y::CublasHandle handle;
+
+    // Math-mode restore: capture before, run, capture after, assert unchanged.
+    cublasMath_t mode_before = CUBLAS_DEFAULT_MATH;
+    CUBLAS_CHECK(cublasGetMathMode(handle.get(), &mode_before));
+    gemm_y::cublas_gemm(handle, dA.view(), dB.view(), dC.view());
+    cublasMath_t mode_after = CUBLAS_DEFAULT_MATH;
+    CUBLAS_CHECK(cublasGetMathMode(handle.get(), &mode_after));
+    CHECK(mode_after == mode_before);
+    CHECK(mode_after == CUBLAS_DEFAULT_MATH);
+
+    gemm_y::copy_d2h(hC.view(), dC.view());
+
+    double max_abs = 0.0, max_rel = 0.0;
+    for (int j = 0; j < N; ++j) {
+        for (int i = 0; i < N; ++i) {
+            const double g = static_cast<double>(hC.view()(i, j));
+            const double r = ref[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * N];
+            const double abs_err = std::fabs(g - r);
+            const double denom = std::fmax(std::fabs(r), 1e-9);
+            const double rel_err = abs_err / denom;
+            if (abs_err > max_abs) max_abs = abs_err;
+            if (rel_err > max_rel) max_rel = rel_err;
+        }
+    }
+    std::printf("[test_cublas_gemm_tfloat] max_abs=%.3e max_rel=%.3e\n", max_abs, max_rel);
+    CHECK(max_rel <= gemm_y::kRelErrTol<T>());
+}
+
 // R8: small Profiler sweep. Register NaiveGemm<bf16>, sweep {32, 64},
 // assert 4 rows (2 sizes x 2 kernels: cuBLAS + naive), all max_rel_err
 // <= kRelErrTol. Exercises the R3 decoupling (run_sweep returns a result,
@@ -461,7 +577,7 @@ void test_profiler_run_sweep_small() {
 
     // All accuracy checks must pass.
     for (const auto& r : result.rows) {
-        CHECK(r.max_rel_err <= gemm_y::kRelErrTol);
+        CHECK(r.max_rel_err <= gemm_y::kRelErrTol<gemm_y::dtypes::bf16>());
     }
 
     // First row per N should be cuBLAS; second should be naive.
@@ -495,6 +611,8 @@ int main() {
     test_cublas_handle();
     test_cublas_gemm_bf16();
     test_cublas_gemm_bf16_strided();
+    test_cublas_gemm_fp16();
+    test_cublas_gemm_tfloat();
     test_naive_gemm_bf16();
     test_profiler_run_sweep_small();
 

@@ -467,7 +467,10 @@ arch,dtype,N,kernel_name,kernel_desc,h2d_ns,kernel_min_ns,kernel_median_ns,d2h_n
   field per specialization:
   - `bf16`   → `CUBLAS_DEFAULT_MATH`
   - `fp16`   → `CUBLAS_DEFAULT_MATH`
-  - `tfloat` → `CUBLAS_TF32_CUBLAS_MATH`
+  - `tfloat` → `CUBLAS_TF32_TENSOR_OP_MATH`
+  (Note: the enum constant in CUDA's `cublas_api.h` is
+  `CUBLAS_TF32_TENSOR_OP_MATH` (value 3); there is no
+  `CUBLAS_TF32_CUBLAS_MATH`.)
 - `cublas_gemm` wraps the `cublasGemmEx` call in a `CublasMathModeGuard`:
   ```cpp
   CublasMathModeGuard guard(handle.get(), TM::math_mode);

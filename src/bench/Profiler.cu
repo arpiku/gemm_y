@@ -203,6 +203,19 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
             }
         #endif
 
+            // Skip-on-fail: timing of mathematically invalid kernels is
+            // meaningless (see ARD.md §6). Print stderr FAIL and continue
+            // without writing the row. cuBLAS reference rows are always
+            // written (they're pushed before this loop, err == 0).
+            constexpr double tol = kRelErrTol<T>();
+            if (err.max_rel > tol) {
+                std::fprintf(stderr,
+                             "[Profiler] FAIL N=%4d %-12s rel_err=%.3e tol=%.3e "
+                             "(skipping row)\n",
+                             N, k.name.c_str(), err.max_rel, tol);
+                continue;
+            }
+
             // Push the kernel row. ref_* reuse the cuBLAS row's kernel_*.
             {
                 SweepRow row;
@@ -222,12 +235,11 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
                 result.rows.push_back(std::move(row));
             }
 
-            const char* verdict = (err.max_rel <= kRelErrTol) ? "PASS" : "FAIL";
             std::printf("[Profiler] N=%4d  %-12s  kernel=%.1f us  ref=%.1f us  "
-                        "rel_err=%.3e  %s\n",
+                        "rel_err=%.3e  PASS\n",
                         N, k.name.c_str(),
                         s.median_ns / 1e3, ref_stats.median_ns / 1e3,
-                        err.max_rel, verdict);
+                        err.max_rel);
         }
     }
 
@@ -245,7 +257,7 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
 }
 
 // Explicit instantiations for the dtypes we support. bf16 is wired now;
-// fp16/fp32 are listed so the harness compiles when their kernels land.
+// fp16/tfloat are listed so the harness compiles when their kernels land.
 template class Profiler<__nv_bfloat16>;
 template class Profiler<__half>;
 template class Profiler<float>;

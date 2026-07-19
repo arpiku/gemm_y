@@ -1,11 +1,8 @@
 // Accuracy.h — host-side comparison of got vs ref, promoted to fp64.
 //
-// Returns max_abs_err and max_rel_err. Tolerance threshold is a constexpr
-// so call sites can compare against it without magic numbers.
-//
-// Tolerance: 1e-2 (conservative; covers cuBLAS non-determinism across
-// reduction orders). Tighten once cuBLAS self-error is characterized
-// (see ARD.md §6).
+// Returns max_abs_err and max_rel_err. Tolerance is a per-dtype compile-time
+// constant (kRelErrTol<T>()) so call sites compare against the right
+// threshold without magic numbers (see ARD.md §6).
 
 #pragma once
 
@@ -17,11 +14,19 @@
 #include <type_traits>
 
 #include "MatrixView.h"
+#include "dtypes.h"
 
 namespace gemm_y {
 
-// Tolerance for bf16 vs cuBLAS reference.
-constexpr double kRelErrTol = 1e-2;
+// Per-dtype relative-error tolerance. Failed kernels (rel_err > tol) are
+// skipped at the Profiler level — see ARD.md §6.
+//   bf16   -> 1e-2 (8-bit mantissa, loosest)
+//   fp16   -> 1e-3 (10-bit mantissa)
+//   tfloat -> 1e-3 (tf32 truncates to 10-bit mantissa; matches fp16)
+template <typename T> constexpr double kRelErrTol();
+template <> constexpr double kRelErrTol<__nv_bfloat16>() { return 1e-2; }
+template <> constexpr double kRelErrTol<__half>()        { return 1e-3; }
+template <> constexpr double kRelErrTol<float>()         { return 1e-3; }
 
 template <typename T>
 struct ErrReport {
