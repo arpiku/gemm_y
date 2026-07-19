@@ -56,7 +56,12 @@ message(STATUS "gemm_y: CUDA arch = ${GEMM_Y_CUDA_ARCH} "
 # ---------------------------------------------------------------------------
 # Warning flags
 # ---------------------------------------------------------------------------
-option(ENABLE_WERROR "Treat compiler warnings as errors" OFF)
+# Note: -Werror is intentionally NOT supported. nvcc's -Werror requires a
+# <kind> argument (e.g. -Werror all-warnings); the bare -Werror form greedily
+# consumes the next flag as its kind, breaking the build. The host-only
+# -Werror path was the only one that worked, and it was deemed not worth the
+# complexity of maintaining two code paths. Rely on the strict warning set
+# below and CI/local vigilance instead.
 
 # Host-compiler warnings applied to pure CXX sources.
 set(_gemm_y_host_warnings
@@ -96,12 +101,6 @@ set(_gemm_y_nvcc_warnings
     -Winit-self
 )
 
-if(ENABLE_WERROR)
-    list(APPEND _gemm_y_host_warnings -Werror)
-    list(APPEND _gemm_y_nvcc_xcompiler_warnings -Werror)
-    list(APPEND _gemm_y_nvcc_warnings -Werror)
-endif()
-
 # Join the nvcc-host warnings into a single -Xcompiler=<a;b;c> argument.
 list(JOIN _gemm_y_nvcc_xcompiler_warnings ";" _gemm_y_nvcc_xcompiler_joined)
 set(_gemm_y_nvcc_xcompiler_flag "Xcompiler=${_gemm_y_nvcc_xcompiler_joined}")
@@ -135,6 +134,15 @@ endfunction()
 # cuBLAS (required for the reference path)
 # ---------------------------------------------------------------------------
 find_package(CUDAToolkit REQUIRED)
+
+# ---------------------------------------------------------------------------
+# CTest registration (Phase 1.7.1)
+# ---------------------------------------------------------------------------
+# Minimal wiring: register the existing test_cuda executable as a single
+# CTest entry. Per-test split is premature for ~15 tests — defer until the
+# count grows past ~30. test_cuda's hand-rolled main() returns nonzero on
+# any CHECK failure, so the exit code propagates to CTest directly.
+enable_testing()
 
 # ---------------------------------------------------------------------------
 # Arch-specific source directories (prepared, not populated)
@@ -186,6 +194,10 @@ add_executable(test_cuda
 target_include_directories(test_cuda PRIVATE src)
 target_link_libraries(test_cuda PRIVATE CUDA::cublas)
 gemm_y_apply_common_flags(test_cuda)
+
+# Register test_cuda with CTest (Phase 1.7.1). The binary's main() returns
+# EXIT_FAILURE on any CHECK failure, so the exit code propagates directly.
+add_test(NAME test_cuda COMMAND test_cuda)
 
 # ---------------------------------------------------------------------------
 # Microbench targets (optional; not part of the default build)

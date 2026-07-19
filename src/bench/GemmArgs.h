@@ -13,9 +13,13 @@ namespace gemm_y {
 
 template <typename T>
 struct GemmArgs {
-    MatrixView<T, Space::Device> A;
-    MatrixView<T, Space::Device> B;
-    MatrixView<T, Space::Device> C;
+    // A and B are kernel inputs (read-only). C is the output (mutable).
+    // The const-ification relies on MatrixView's implicit converting
+    // constructor (MatrixView<T,S> -> MatrixView<const T,S>), so call
+    // sites passing writable views for A/B compile unchanged (Phase 1.7.3).
+    MatrixView<const T, Space::Device> A;  // input, read-only
+    MatrixView<const T, Space::Device> B;  // input, read-only
+    MatrixView<T,       Space::Device> C;  // output, mutable
     // float alpha = 1.0f;  // reserved for Phase 2+
     // float beta  = 0.0f;  // reserved for Phase 2+
 };

@@ -39,6 +39,15 @@ template <> struct CublasTypeMap<float> {
 
 // C = A * B  (no transpose, no epilogue). ColMajor only in Phase 1.
 // A is (m x k), B is (k x n), C is (m x n). All views must be ColMajor.
+//
+// Note: A and B are inputs (read-only in spirit) but are NOT const-ified
+// here. cublas_gemm is a function template, and C++ template argument
+// deduction does not consider implicit conversions — so
+// MatrixView<T,S> -> MatrixView<const T,S> (via MatrixView's converting
+// constructor) would fail deduction at every call site. The const
+// contract is enforced at the GemmArgs level (NaiveGemm and future
+// kernels take GemmArgs<T> with const A/B); cublas_gemm is the
+// reference path and takes writable views for API simplicity.
 template <typename T>
 void cublas_gemm(CublasHandle& handle,
                  MatrixView<T, Space::Device> A,

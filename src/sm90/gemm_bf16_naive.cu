@@ -8,6 +8,7 @@
 #include "gemm_bf16_naive.cuh"
 
 #include "bench/GemmArgs.h"
+#include "CudaCheck.h"
 #include "MatrixView.h"
 #include "cuda_compat.h"
 
@@ -16,9 +17,9 @@ namespace gemm_y {
 namespace detail {
 
 template <typename T>
-__global__ void naive_gemm_kernel(MatrixView<T, Space::Device> A,
-                                  MatrixView<T, Space::Device> B,
-                                  MatrixView<T, Space::Device> C) {
+__global__ void naive_gemm_kernel(MatrixView<const T, Space::Device> A,
+                                  MatrixView<const T, Space::Device> B,
+                                  MatrixView<T,       Space::Device> C) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const int j = blockIdx.y * blockDim.y + threadIdx.y;
     if (i >= C.rows || j >= C.cols) return;
@@ -36,6 +37,13 @@ __global__ void naive_gemm_kernel(MatrixView<T, Space::Device> A,
 
 template <typename T>
 void NaiveGemm<T>::operator()(GemmArgs<T> args, cudaStream_t /*stream*/) const {
+    // Debug-only ColMajor invariant (Phase 1.7.5). See sm120 variant for
+    // rationale; duplicated here per AGENTS.md §8 (separate .cu files,
+    // no #ifdef branches).
+    GEMM_Y_ASSERT(args.A.layout == Layout::ColMajor &&
+                  args.B.layout == Layout::ColMajor &&
+                  args.C.layout == Layout::ColMajor,
+                  "NaiveGemm assumes ColMajor inputs");
     constexpr int kBlock = 16;
     const int grid_x = (args.C.rows + kBlock - 1) / kBlock;
     const int grid_y = (args.C.cols + kBlock - 1) / kBlock;

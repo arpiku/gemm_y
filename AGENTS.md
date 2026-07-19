@@ -52,8 +52,9 @@ cmake --build build -j
 # Debug build (-O0 -g)
 cmake -B build -DCMAKE_BUILD_TYPE=Debug
 
-# Warnings as errors (CI / strict local checks)
-cmake -B build -DENABLE_WERROR=ON
+# Note: -Werror is intentionally not supported (nvcc's -Werror requires a
+# <kind> argument and greedily consumes the next flag as its value, breaking
+# the build). Rely on the strict warning set compiled in by default.
 ```
 
 Targets:
@@ -136,7 +137,9 @@ Do not load `ARD.md` in full unless reviewing a specific decision.
 - `nvcc` host compiler: reduced subset (see `CMakeLists.txt` for the
   rationale — CUDA's own headers trip the dropped flags).
 - `nvcc` native: `-Wreorder -Winit-self`.
-- `-Werror` is opt-in via `-DENABLE_WERROR=ON`; default OFF during active dev.
+- `-Werror` is not supported (nvcc's `-Werror` requires a `<kind>` argument
+  and greedily consumes the next flag as its value, breaking the build).
+  Rely on the strict warning set compiled in by default.
 
 ## Benchmarking Protocol
 

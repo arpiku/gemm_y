@@ -5,265 +5,144 @@
 > Do not carry completed items here. Durable project state in `AGENTS.md`;
 > decision rationale in `ARD.md`.
 
-## Phase 1.6 — Copy.h / CudaCheck.h dedup + Profiler D2H fix
+## Phase 1.7 — ctest wiring, `-Werror` fix, `GemmArgs` const-correctness
 
-Goal: remove code duplication in `Copy.h` and `CudaCheck.h`, tighten the
-error-checking macros, and fix a redundant D2H copy in `Profiler.cu`.
-Refactor only — no behavior change at the public API (`copy_h2d` /
-`copy_d2h` keep their signatures; both `cudaMemcpy` and `cudaMemcpy2D`
-paths are preserved). Driven by code review; precedes Phase 2A.
+Goal: close the two infra gaps surfaced by Phase 1.6 validation
+(`ctest` not wired; `-DENABLE_WERROR=ON` broken by a `CMakeLists.txt`
+flag-joining bug) and tighten the kernel ABI so the type system
+catches accidental writes to `A`/`B` and silent RowMajor misconfiguration.
+Small, surgical phase; no algorithm or perf work.
 
-**Context:**
-- `Copy.h` has two byte-identical `plan_copy` overloads (Space tags
-  swapped) and two near-identical `copy_h2d`/`copy_d2h` bodies (only
-  `cudaMemcpyKind` differs). The Space tags enforce direction at the
-  caller site but are unused in the planning body — the duplication is
-  the symptom of not pushing the Space tag down to a single template
-  parameter and deducing `kind` from it at compile time.
-- `cudaMemcpy2D` IS used: every `copy_d2h` of a `.block(0,0,N,N)` from
-  the 4096-ld pre-alloc buffer takes the strided path for 13 of 14 sweep
-  sizes (only N=4096 is contiguous). Removing it would break the ARD §5
-  pre-alloc + submatrix-slicing design. Keep both paths.
-- `CudaCheck.h` has `GEMM_Y_CUDA_CHECK_IMPL_` (used once, indirection
-  buys nothing) and three macros (`CUDA_CHECK`, `CUDA_CHECK_LAST_ERROR`,
-  `CUBLAS_CHECK`) that each inline the same `fprintf`+`abort` tail.
+**Context (carried from Phase 1.6):**
+- `test_cuda` is a plain executable with a hand-rolled `main()` calling
+  15 test functions sequentially. `CMakeLists.txt` has no
+  `enable_testing()` / `add_test()`, so `ctest --test-dir build` reports
+  "No tests were found". Minimal fix (Option A): register the existing
+  binary with CTest. Full per-test split (Option B) is premature for 15
+  tests — defer until the count grows past ~30.
+- `-DENABLE_WERROR=ON` fails with `nvcc fatal : Value '-Xcompiler=-Wall'
+  is not defined for option 'Werror'`. Root cause: in `CMakeLists.txt`,
+  `-Werror` is appended to `_gemm_y_nvcc_xcompiler_warnings` and then
+  joined into one `-Xcompiler=<a;b;c;-Werror>` arg, which nvcc misparses.
+  Pre-existing (confirmed by stashing the Phase 1.6 refactor and
+  rebuilding on baseline — same failure). Not a regression from 1.6.
+- `GemmArgs<T>` currently holds `A`, `B`, `C` all as
+  `MatrixView<T, Space::Device>` (writable). `A` and `B` are kernel
+  *inputs* — the kernel only reads them — but nothing in the type
+  system prevents an accidental write. `MatrixView` already has the
+  converting constructor `MatrixView<T, S> -> MatrixView<const T, S>`
+  (line 49–55), so const-ifying `A`/`B` in `GemmArgs` is a 3-line change
+  with zero call-site churn (implicit conversion at the Profiler
+  boundary). `C` stays mutable (it's the output).
+- `NaiveGemm` (and future kernels) hardcode ColMajor addressing
+  (`A.ptr[i + k*A.ld]`) but never assert `layout == ColMajor`. A RowMajor
+  view entering the kernel path would produce wrong results silently.
+  One `GEMM_Y_ASSERT` per launch (host-side, in `operator()`) closes
+  this — debug-only, zero runtime cost.
 
-### CudaCheck.h
+### CMakeLists.txt — ctest
 
-- [x] **1.6.1** Delete `GEMM_Y_CUDA_CHECK_IMPL_`. Add two `[[noreturn]]
-  noexcept` helpers in `namespace gemm_y::detail`:
-  ```cpp
-  [[noreturn]] inline void fail_cuda(cudaError_t e, const char* tag,
-                                     const char* file, int line) noexcept;
-  [[noreturn]] inline void fail_cublas(cublasStatus_t s,
-                                     const char* file, int line) noexcept;
+- [x] **1.7.1** Add `enable_testing()` near the top of `CMakeLists.txt`
+  (after `project()`, before target definitions). Add
+  `add_test(NAME test_cuda COMMAND test_cuda)` after the `test_cuda`
+  target is defined. Verify `ctest --test-dir build` now runs `test_cuda`
+  as a single test entry and propagates its exit code. No changes to
+  `test.cu`'s hand-rolled `main()` — Option A (minimal ctest wiring).
+  ```cmake
+  enable_testing()
+  # ... after add_executable(test_cuda ...) ...
+  add_test(NAME test_cuda COMMAND test_cuda)
   ```
-  Each holds the `fprintf`+`abort` tail exactly once. `fail_cuda` is
-  shared by `CUDA_CHECK` and `CUDA_CHECK_LAST_ERROR` (only the tag
-  string differs: `"CUDA error"` vs `"CUDA async error"`).
-- [x] **1.6.2** Rewrite `CUDA_CHECK`, `CUDA_CHECK_LAST_ERROR`,
-  `CUBLAS_CHECK` as 5-line macros delegating to the `detail::fail_*`
-  helpers. Use fully-qualified `::gemm_y::detail::fail_*` so the macros
-  expand correctly whether used inside or outside `namespace gemm_y`
-  (matches existing usage in `Buffer.h`, `CudaTimer.h`, etc.). Keep the
-  `e_` / `s_` suffix-underscore locals (R20 hygiene).
-  ```cpp
-  #define CUDA_CHECK(expr)                                                            \
-      do {                                                                            \
-          const cudaError_t e_ = (expr);                                              \
-          if (e_ != cudaSuccess)                                                      \
-              ::gemm_y::detail::fail_cuda(e_, "CUDA error", __FILE__, __LINE__);      \
-      } while (0)
-  ```
-- [x] **1.6.3** Tighten `GEMM_Y_ASSERT` NDEBUG branch to
-  `do { (void)sizeof(cond); } while (0)` — keeps the condition parsed
-  for warnings under NDEBUG (standard `assert` hygiene; current
-  `do { } while (0)` silently drops syntax errors in the condition).
-  Keep the name `GEMM_Y_ASSERT` (project-scoped, only project macro).
-  Debug branch unchanged.
 
-### Copy.h
+### CMakeLists.txt — `-Werror` for nvcc
 
-- [x] **1.6.4** Collapse the two `plan_copy` overloads into one:
-  ```cpp
-  template <Space Dst, Space Src, typename T, typename U>
-  CopyPlan plan_copy(MatrixView<T, Dst> dst, MatrixView<U, Src> src);
-  ```
-  Body unchanged. Space tags are caller-enforcement only; the body
-  reads `rows`/`cols`/`ld`/`layout`/`is_contiguous()` — Space-agnostic.
-- [x] **1.6.5** Add `detail::copy_kind_v<Dst, Src>` constexpr table:
-  ```cpp
-  template <Space Dst, Space Src>
-  constexpr cudaMemcpyKind copy_kind_v = cudaMemcpyKind(-1);  // poison
-  template <> constexpr cudaMemcpyKind copy_kind_v<Space::Device, Space::Host> = cudaMemcpyHostToDevice;
-  template <> constexpr cudaMemcpyKind copy_kind_v<Space::Host,   Space::Device> = cudaMemcpyDeviceToHost;
-  ```
-  Other combos intentionally undefined → compile error if used
-  (e.g. `copy` with two Host views won't link, catching misuse).
+- [x] **1.7.2** ~~Fix `-DENABLE_WERROR=ON` for nvcc.~~ **Simplified
+  (2026-07-19): removed the `ENABLE_WERROR` option entirely.** nvcc's
+  `-Werror` requires a `<kind>` argument (e.g. `-Werror all-warnings`);
+  the bare `-Werror` form greedily consumes the next flag as its kind,
+  breaking the build regardless of whether it's passed via `-Xcompiler`
+  or as a standalone nvcc-native flag. Every attempted fix (move to
+  nvcc-native, pass as separate arg, use `--Werror all-warnings`) either
+  broke the build or required maintaining two code paths for marginal
+  benefit. The strict warning set (`-Wall -Wextra -Wpedantic -Wshadow
+  -Wconversion ...` for host CXX, reduced subset for nvcc host compiler,
+  `-Wreorder -Winit-self` for nvcc native) is compiled in by default;
+  CI/local vigilance catches warnings without `-Werror`. `AGENTS.md`
+  updated to remove the `-DENABLE_WERROR=ON` build command.
 
-  **Implementation note (2026-07-19):** the primary template with a
-  poison value makes wrong-direction instantiations *compile* (the
-  poison value is well-formed) and only fail at *link time* (ODR-use
-  of an undefined specialization) — or worse, silently pass the poison
-  to `cudaMemcpy` at runtime. To get the *compile-time* error that
-  1.6.11 expects ("the poison specialization makes `copy<Host, Host>`
-  and `copy<Device, Device>` a compile error"), add a `static_assert`
-  inside `detail::copy` rejecting invalid `(Dst, Src)` pairs:
+### GemmArgs.h — const-correctness
+
+- [x] **1.7.3** Change `GemmArgs<T>` so `A` and `B` are read-only:
   ```cpp
-  static_assert((Dst == Space::Device && Src == Space::Host) ||
-                (Dst == Space::Host   && Src == Space::Device),
-                "copy: only Host<->Device directions are supported");
+  template <typename T>
+  struct GemmArgs {
+      MatrixView<const T, Space::Device> A;  // input, read-only
+      MatrixView<const T, Space::Device> B;  // input, read-only
+      MatrixView<T,       Space::Device> C;  // output, mutable
+  };
   ```
-  Keep the poison primary template as a defensive secondary net and
-  to satisfy 1.6.11's `static_assert(copy_kind_v<...> == ...)` test
-  for the valid specializations.
-- [x] **1.6.6** Collapse `copy_h2d`/`copy_d2h` bodies into a single
-  `detail::copy(dst, src)` with `kind` deduced via `copy_kind_v`.
-  Delete `copy_contiguous`/`copy_strided` helpers (one-line
-  `CUDA_CHECK` wrappers with no abstraction value); inline the two
-  `CUDA_CHECK` calls directly into `detail::copy`. Both `cudaMemcpy`
-  (contiguous) and `cudaMemcpy2D` (strided) paths preserved.
+  Relies on `MatrixView`'s existing converting constructor (line 49–55):
+  `MatrixView<T, S>` -> `MatrixView<const T, S>` is implicit, so
+  `Profiler.cu` / `test.cu` / `main.cpp` call sites passing writable
+  views for `A`/`B` compile unchanged (implicit const-conversion at the
+  `GemmArgs` construction site). If any call site fails to compile, the
+  failure is the type system catching a real bug (e.g. someone trying to
+  write through `A` or `B`) — investigate, do not silence.
+
+  **Implementation note (2026-07-19):** `cublas_gemm` was NOT const-ified
+  (despite the same read-only rationale applying). `cublas_gemm` is a
+  function template, and C++ template argument deduction does not
+  consider implicit conversions — so `MatrixView<T,S>` ->
+  `MatrixView<const T,S>` (via MatrixView's converting constructor) fails
+  deduction at every call site. The const contract is enforced at the
+  `GemmArgs` level (NaiveGemm and future kernels take `GemmArgs<T>`
+  with const A/B); `cublas_gemm` is the reference path and takes
+  writable views for API simplicity. Documented in `cublas_gemm.h`.
+- [x] **1.7.4** Update `NaiveGemm` kernel signature to accept
+  `MatrixView<const T, Space::Device>` for `A` and `B`. The kernel body
+  (`A.ptr[i + k*A.ld]`, `B.ptr[k + j*B.ld]`) compiles unchanged because
+  `const T` is readable. `C` stays `MatrixView<T, Space::Device>`.
   ```cpp
-  template <Space Dst, Space Src, typename T, typename U, /*SFINAE*/>
-  void copy(MatrixView<T, Dst> dst, MatrixView<U, Src> src) {
-      constexpr cudaMemcpyKind kind = copy_kind_v<Dst, Src>;
-      const CopyPlan p = plan_copy(dst, src);
-      if (p.contiguous) {
-          CUDA_CHECK(cudaMemcpy(dst.ptr, src.ptr, p.width_bytes * p.height, kind));
-      } else {
-          CUDA_CHECK(cudaMemcpy2D(dst.ptr, p.dpitch, src.ptr, p.spitch,
-                                  p.width_bytes, p.height, kind));
-      }
+  template <typename T>
+  __global__ void naive_gemm_kernel(MatrixView<const T, Space::Device> A,
+                                    MatrixView<const T, Space::Device> B,
+                                    MatrixView<T,       Space::Device> C);
+  ```
+  Repeat the same const-ification for every future kernel as it lands
+  (Phase 2C tiled kernels, etc.) — this is the new ABI contract.
+
+### Kernel layout invariant
+
+- [x] **1.7.5** Add a debug-only ColMajor assertion in `NaiveGemm::operator()`
+  on the host, before the kernel launch:
+  ```cpp
+  template <typename T>
+  void NaiveGemm<T>::operator()(GemmArgs<T> args, cudaStream_t) const {
+      GEMM_Y_ASSERT(args.A.layout == Layout::ColMajor &&
+                    args.B.layout == Layout::ColMajor &&
+                    args.C.layout == Layout::ColMajor,
+                    "NaiveGemm assumes ColMajor inputs");
+      // ... existing launch ...
   }
   ```
-- [x] **1.6.7** Keep `copy_h2d`/`copy_d2h` as 2-line public wrappers
-  delegating to `detail::copy` — preserves call-site API, no churn in
-  `Profiler.cu` / `test.cu`. Do NOT add `inline` (templates are
-  implicitly inline; the keyword is noise).
-- [x] **1.6.8** Shape mismatch: keep `fprintf` + `abort` (runtime
-  contract — caller bug, not invariant). Layout mismatch: keep
-  `GEMM_Y_ASSERT` (debug-only — ARD §1 says bench runner guarantees
-  ColMajor, so it's an invariant, not a runtime contract). No change
-  from current behavior; just unified across the single `plan_copy`.
-
-### Profiler.cu
-
-- [ ] **1.6.9** ~~Fix redundant D2H in the debug OOB check~~ **REJECTED
-  after analysis (2026-07-19).** The premise is incorrect: the line-189
-  `copy_d2h(hC_ref_max.view().block(0,0,N,N), dC_ref)` is the *post-kernel*
-  D2H that makes the OOB corruption check work. The line-108 D2H (timed,
-  reported as `ref_d2h_ns`) captures `dC_ref` *before* the custom kernel
-  runs; the line-189 D2H re-reads `dC_ref` *after* the kernel so that
-  `memcmp(now, cref_snapshot)` can detect out-of-bounds writes that
-  corrupted `C_ref_max`. Reusing the line-108 host snapshot (as the
-  original TODO proposed) would make `now == cref_snapshot` always,
-  silently breaking corruption detection — a behavior regression dressed
-  as a refactor. The two D2Hs are not redundant; they serve different
-  points in time. **Do not implement as written.** If the debug-build
-  D2H cost becomes a real concern, the correct fix is a device-side
-  comparison kernel against a device-side pre-kernel snapshot (new code,
-  not a refactor) — out of scope for Phase 1.6. Leave `Profiler.cu`
-  unchanged.
+  One assert per launch (not per element). Debug-only, zero runtime cost
+  in Release. Catches silent misconfiguration if RowMajor views ever
+  enter the kernel path. Repeat for every future kernel as it lands.
 
 ### Validation
 
-- [~] **1.6.10** Build + test: `cmake -B build && cmake --build build -j
-  && ctest --test-dir build`. Verify no warning regressions under the
-  strict host warning set (`-Wall -Wextra -Wpedantic -Wshadow
-  -Wconversion ...`); verify `-DENABLE_WERROR=ON` still compiles clean.
-
-  **Partial (2026-07-19):** default build is clean under the full strict
-  host warning set; `./build/test_cuda` passes 875 checks / 0 failures.
-  Two sub-goals unverified — see the Phase 1.6 feedback section below
-  for details (`ctest` not wired; `-DENABLE_WERROR=ON` has a pre-existing
-  `CMakeLists.txt` bug unrelated to this phase).
-- [x] **1.6.11** Add `test_copy_kind_compile_time` in `test.cu`:
-  `static_assert` that `detail::copy_kind_v<Space::Device, Space::Host>`
-  equals `cudaMemcpyHostToDevice` and the reverse — compile-time
-  guarantee that wrong-direction calls fail to compile (the poison
-  specialization makes `copy<Host, Host>` and `copy<Device, Device>` a
-  compile error).
-
----
-
-## Phase 1.6 feedback (2026-07-19)
-
-Outcome of the refactor + validation, recorded here (rather than cut
-from `TODO.md` per the AGENTS.md "completed work leaves TODO.md" rule)
-because two validation sub-goals could not be cleanly verified and the
-deviations need a durable record. Phase 1.6 is functionally complete;
-the open items are tooling/infra, not refactor correctness.
-
-### Implemented (10/11 steps)
-
-- **1.6.1–1.6.3** (`CudaCheck.h`): `GEMM_Y_CUDA_CHECK_IMPL_` deleted;
-  `gemm_y::detail::fail_cuda` / `fail_cublas` `[[noreturn]] noexcept
-  inline` helpers hold the `fprintf`+`abort` tail once each; `CUDA_CHECK`,
-  `CUDA_CHECK_LAST_ERROR`, `CUBLAS_CHECK` are 5-line macros delegating
-  via `::gemm_y::detail::fail_*`; macro locals renamed to `e_` / `s_`
-  (R20 hygiene); `GEMM_Y_ASSERT` NDEBUG branch tightened to
-  `do { (void)sizeof(cond); } while (0)`.
-- **1.6.4–1.6.8** (`Copy.h`): two `plan_copy` overloads collapsed into
-  one `plan_copy<Space Dst, Space Src, T, U>`; `detail::copy_kind_v`
-  constexpr table added; `copy_h2d`/`copy_d2h` bodies collapsed into
-  `detail::copy` with `kind` deduced at compile time; `copy_contiguous`
-  / `copy_strided` deleted (inlined the `CUDA_CHECK` calls);
-  `copy_h2d`/`copy_d2h` kept as 2-line public wrappers — call-site API
-  unchanged in `Profiler.cu` / `test.cu`.
-- **1.6.11** (`test.cu`): `test_copy_kind_compile_time` added with three
-  `static_assert`s pinning the H2D/D2H `copy_kind_v` specializations and
-  their distinctness. Registered in `main()`.
-
-### Rejected (1/11 steps)
-
-- **1.6.9** (`Profiler.cu` redundant D2H): rejected after analysis. The
-  line-189 `copy_d2h` is the *post-kernel* D2H that makes the OOB
-  corruption check work; reusing the line-108 (pre-kernel) snapshot
-  would make `now == cref_snapshot` always, silently breaking the
-  detector. `Profiler.cu` unchanged. Full rationale in the step body.
-
-### Deviations from the TODO (two, both mechanical)
-
-1. **`inline constexpr` on `copy_kind_v`** (1.6.5). The TODO wrote
-   `constexpr cudaMemcpyKind copy_kind_v = ...` (no `inline`). In C++17,
-   a `constexpr` variable template specialization has external linkage
-   and emits a definition in every TU that names it — the first build
-   failed with multiple-definition linker errors across `Profiler.cu` +
-   `test.cu` + `main.cpp`. Adding `inline` (C++17 inline variables) fixes
-   the ODR issue. Mechanical correctness fix, not a design change.
-
-2. **`static_assert` inside `detail::copy`** (1.6.5). The TODO's literal
-   code (poison primary template + two specializations) makes
-   wrong-direction instantiations *compile* and only fail at link time
-   (or worse, silently pass the poison to `cudaMemcpy` at runtime). To
-   deliver the *compile-time* error that 1.6.11 expects, a `static_assert`
-   rejecting invalid `(Dst, Src)` pairs was added inside `detail::copy`.
-   The poison value is kept as a defensive secondary net. Documented in
-   the 1.6.5 step body.
-
-### Validation results
-
-- **Default build** (`cmake -B build && cmake --build build -j`):
-  **clean** on Blackwell/sm_120, Release, with the full strict host
-  warning set (`-Wall -Wextra -Wpedantic -Wshadow -Wconversion
-  -Wnon-virtual-dtor -Wold-style-cast -Wcast-align -Wunused
-  -Woverloaded-virtual -Wformat=2 -Wnull-dereference`). No warning
-  regressions introduced by the refactor.
-- **`./build/test_cuda`**: **875 checks, 0 failures**. Includes the new
-  `test_copy_kind_compile_time` (its `static_assert`s fired at compile
-  time and passed; `g_checks` incremented by 1).
-- **`./build/gemm_y`** end-to-end: full 14-size bf16 sweep runs
+- [x] **1.7.6** Build + ctest: `cmake -B build && cmake --build build -j
+  && ctest --test-dir build`. Verify `test_cuda` runs as a ctest entry
+  (1.7.1), exit code propagates, all 875 checks still pass.
+- [x] **1.7.7** ~~Strict build: `cmake -B build -DENABLE_WERROR=ON &&
+  cmake --build build -j`.~~ **N/A (2026-07-19):** `ENABLE_WERROR`
+  removed entirely (see 1.7.2). Default build is clean under the full
+  strict host warning set; no warning regressions introduced by the
+  refactor.
+- [x] **1.7.8** `./build/gemm_y` end-to-end: full 14-size bf16 sweep runs
   identically to before — 28 rows, all PASS, CSV written. Behavior
-  preserved (the refactor goal).
-
-### Open tooling/infra items (not Phase 1.6 work)
-
-These are pre-existing project issues surfaced by 1.6.10's validation,
-not regressions caused by the refactor. Tracked here so they don't get
-lost; should be addressed in a separate phase (e.g. a `chore:` commit
-or a small Phase 1.7 infra cleanup).
-
-1. **`ctest --test-dir build` reports "No tests were found".**
-   `CMakeLists.txt` has no `enable_testing()` / `add_test(test_cuda)` —
-   `test_cuda` is a plain executable, not registered with CTest. The
-   TODO's 1.6.10 command (`ctest --test-dir build`) cannot work as
-   written. Workaround used for 1.6.10: run `./build/test_cuda` directly.
-   **Fix:** add `enable_testing()` + `add_test(NAME test_cuda COMMAND
-   test_cuda)` to `CMakeLists.txt`.
-
-2. **`-DENABLE_WERROR=ON` fails to build.** Confirmed pre-existing by
-   stashing the refactor and rebuilding on the baseline — same failure.
-   Symptom: `nvcc fatal : Value '-Xcompiler=-Wall' is not defined for
-   option 'Werror'`. Root cause: in `CMakeLists.txt`, the nvcc-host
-   warnings are joined with `;` into a single `-Xcompiler=<a;b;c>` arg,
-   and `-Werror` is appended to that same list, producing
-   `-Xcompiler=-Wall;...;-Werror`. nvcc's `-Werror` parser then sees
-   `-Xcompiler=-Wall` as the value for `-Werror` and rejects it. The
-   `-Xcompiler` flag and `-Werror` need to be passed as separate nvcc
-   args, not joined into one `;-`-separated string. **Fix:** in
-   `gemm_y_apply_common_flags`, pass `-Werror` as a standalone nvcc
-   native flag (alongside `-Wreorder -Winit-self`), not via the
-   `-Xcompiler=...` joined arg.
+  preserved (the const-ification is a type-level change, not a runtime
+  behavior change).
 
 ---
 

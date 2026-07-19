@@ -10,6 +10,7 @@
 #include "gemm_bf16_naive.cuh"
 
 #include "bench/GemmArgs.h"
+#include "CudaCheck.h"
 #include "MatrixView.h"
 #include "cuda_compat.h"
 
@@ -18,9 +19,9 @@ namespace gemm_y {
 namespace detail {
 
 template <typename T>
-__global__ void naive_gemm_kernel(MatrixView<T, Space::Device> A,
-                                  MatrixView<T, Space::Device> B,
-                                  MatrixView<T, Space::Device> C) {
+__global__ void naive_gemm_kernel(MatrixView<const T, Space::Device> A,
+                                  MatrixView<const T, Space::Device> B,
+                                  MatrixView<T,       Space::Device> C) {
     // 1 thread per C element. Grid covers (rows, cols).
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const int j = blockIdx.y * blockDim.y + threadIdx.y;
@@ -40,6 +41,13 @@ __global__ void naive_gemm_kernel(MatrixView<T, Space::Device> A,
 
 template <typename T>
 void NaiveGemm<T>::operator()(GemmArgs<T> args, cudaStream_t /*stream*/) const {
+    // Debug-only ColMajor invariant (Phase 1.7.5). The kernel hardcodes
+    // ColMajor addressing; a RowMajor view would produce wrong results
+    // silently. One assert per launch (host-side), zero Release cost.
+    GEMM_Y_ASSERT(args.A.layout == Layout::ColMajor &&
+                  args.B.layout == Layout::ColMajor &&
+                  args.C.layout == Layout::ColMajor,
+                  "NaiveGemm assumes ColMajor inputs");
     // 16x16 threads per block. Grid covers the C matrix.
     constexpr int kBlock = 16;
     const int grid_x = (args.C.rows + kBlock - 1) / kBlock;
