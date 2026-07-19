@@ -5,66 +5,217 @@
 > Do not carry completed items here. Durable project state in `AGENTS.md`;
 > decision rationale in `ARD.md`.
 
-## Phase 2A — cuBLAS references for all paths
+## Phase 2A — cuBLAS references for bf16 / fp16 / tf32
 
-Goal: reference kernels available for all three paths so any custom kernel
-variant can be benchmarked against the right cuBLAS baseline.
+Goal: cuBLAS reference paths available for all three storage dtypes so any
+custom kernel variant can be benchmarked against the right baseline.
 
-**Three paths (priority order):**
-1. **Path 1 (primary)**: fp16 + bf16, tensor cores, fp32 accum. fp16 and
-   bf16 should show no meaningful perf difference on Hopper/Blackwell
-   tensor cores — optimize one, replicate ideas to the other.
-2. **Path 2 (secondary)**: fp32 storage, tf32 compute, tensor cores.
-3. **Path 3 (tertiary, may skip optimization)**: fp32 pedantic, CUDA cores.
-   Reference must exist for comparison even if no custom kernel is written.
+**Three dtypes (priority order):**
+1. **bf16** (primary): tensor cores, fp32 accum. Phase 1 baseline.
+2. **fp16** (primary sibling): tensor cores, fp32 accum. Should show no
+   meaningful perf difference vs bf16 on Hopper/Blackwell TCs — optimize
+   one, replicate ideas to the other.
+3. **tfloat** (secondary): `tfloat = float` alias. tf32 compute (TC),
+   not pedantic fp32 (CUDA cores). The pedantic CUDA-core path is
+   dropped entirely — see ARD §9.
 
-- [ ] **2A.1** `cublas_gemm.h`: verify fp32-pedantic path (CublasTypeMap<float>
-  already maps to CUDA_R_32F data + compute, CUBLAS_DEFAULT_MATH). No code
-  change expected — confirm via unit test.
-- [ ] **2A.2** `cublas_gemm.h`: add `cublas_gemm_tf32(handle, A, B, C, stream)`
-  — `float` storage, `CUBLAS_TF32_CUBLAS_MATH` compute, tensor cores.
-  Distinct entry point (not overload) because storage dtype is identical
-  to pedantic fp32; the difference is the math mode.
-- [ ] **2A.3** `CublasHandle`: add `WithMathMode` RAII guard — ctor sets
-  mode, dtor restores. Used by `cublas_gemm_tf32`. Cleaner than manual
-  save/restore; documents the non-thread-safe toggle.
-- [ ] **2A.4** `Profiler<float>`: register `CublasTf32Reference` functor
-  (wraps `cublas_gemm_tf32`) alongside the pedantic fp32 reference. Two
-  reference rows per N in the fp32 CSV (pedantic + tf32) — shows the
-  tensor-core speedup ceiling for fp32 inputs.
-- [ ] **2A.5** `main.cpp`: extend to run sweeps for bf16, fp16, fp32
-  (pedantic + tf32). One `Profiler<T>` per storage dtype; one CSV per
-  `(arch, dtype)`. tf32 rows live in the fp32 CSV.
-- [ ] **2A.6** `Accuracy.h`: per-dtype `kRelErrTol` specializations:
-  bf16 → 1e-2, fp16 → 1e-3, fp32 pedantic → 1e-5, tf32 → 1e-3.
-- [ ] **2A.7** `test.cu`: add `test_cublas_gemm_fp16`, `test_cublas_gemm_fp32`
-  (pedantic), `test_cublas_gemm_tf32`. tf32 test must verify math-mode
-  restore (run pedantic → tf32 → pedantic, assert mode restored).
+**Key decisions (see ARD §6, §9 for rationale):**
+- `tfloat = float` alias, always commented: `// tfloat = tf32 path (TC),
+  not pedantic fp32 (CUDA cores).`
+- `CublasTypeMap<T>` gains a `math_mode` field; `cublas_gemm` wraps the
+  call in `CublasMathModeGuard(handle, TM::math_mode)`. No distinct
+  `cublas_gemm_tf32` entry point — `cublas_gemm<float>` *is* the tf32 path.
+- `kRelErrTol<T>` per-dtype constant. Failed kernels (rel_err > tol) are
+  **skipped at the Profiler level** — no CSV row, stderr FAIL message
+  only. Timing of mathematically invalid kernels is meaningless.
+- `NaiveGemm<fp16>` and `NaiveGemm<tfloat>` are deferred to Phase 2C.
+  2A registers only `NaiveGemm<bf16>` (already exists) + cuBLAS reference
+  (auto-included by Profiler) for all three dtypes.
+
+### C++ changes
+
+- [ ] **2A.1** `src/dtypes.h`: add `using tfloat = float;` alias with
+  inline comment explaining the tf32-only intent. Change
+  `name<float>()` to return `"tf32"`. Drop the `fp32` name (no pedantic
+  path). Document the alias in ARD §9.
+- [ ] **2A.2** `src/cublas/cublas_gemm.h`: extend `CublasTypeMap<T>` with
+  a `static constexpr cublasMath_t math_mode` field per specialization:
+  - `bf16` → `CUBLAS_DEFAULT_MATH`
+  - `fp16` → `CUBLAS_DEFAULT_MATH`
+  - `float` (tfloat) → `CUBLAS_TF32_CUBLAS_MATH`
+  Update the `cublas_gemm` body to construct a `CublasMathModeGuard`
+  around the `cublasGemmEx` call. No distinct `cublas_gemm_tf32` entry
+  point — the math mode is selected by `CublasTypeMap<T>::math_mode`.
+- [ ] **2A.3** `src/cublas/CublasHandle.h`: add free class
+  `CublasMathModeGuard` (ctor captures prev mode via
+  `cublasGetMathMode`, sets new mode; dtor restores prev). Non-copyable,
+  non-movable. Used by `cublas_gemm`.
+- [ ] **2A.4** `src/bench/Accuracy.h`: replace the single global
+  `kRelErrTol` constant with `template <typename T> constexpr double
+  kRelErrTol<T>()` specializations:
+  - `bf16`  → `1e-2`
+  - `fp16`  → `1e-3`
+  - `tfloat`→ `1e-3`
+  Keep `compare<T>(ref, got)` returning `ErrReport<T>` unchanged.
+- [ ] **2A.5** `src/bench/Profiler.cu`: in `run_sweep`, after
+  `compare<T>(...)`, check `err.max_rel > kRelErrTol<T>`. If true:
+  print stderr FAIL message with N, kernel name, rel_err, tol; **skip
+  the row** (`continue` to next kernel). Do not write the SweepRow.
+  Passing kernels write the row as before. cuBLAS reference rows are
+  always written (ground truth, err == 0).
+- [ ] **2A.6** `src/main.cpp`: extend to run three sequential sweeps
+  (bf16, fp16, tfloat). Each sweep: construct `Profiler<T>`, register
+  `NaiveGemm<T>` (bf16 only — fp16/tfloat register cuBLAS-only for 2A),
+  call `run_sweep`, write CSV + `.meta` sidecar. One `(arch, dtype)`
+  pair per CSV. Use explicit blocks (no template metaprogramming).
+- [ ] **2A.7** `src/main.cpp`: add `write_meta()` helper that writes a
+  simple key=value sidecar file `results/bench_<arch>_<dtype>.meta`
+  alongside the CSV. Format:
+  ```
+  arch=sm_120
+  dtype=bf16
+  warmup_iters=20
+  timed_iters=50
+  tol=1e-2
+  sweep_sizes=32,64,96,128,192,256,384,512,768,1024,1536,2048,3072,4096
+  kernel=cublas|cublasGemmEx reference (fp32 accum)
+  kernel=NaiveGemm|naive GEMM, one thread per element
+  timestamp=2026-07-19T17:44:00Z
+  ```
+  - `|` separates kernel name and description (descriptions may contain
+    commas/spaces; `|` will not).
+  - Multiple `kernel=` lines (one per registered kernel, cuBLAS first).
+  - `timestamp` from `std::chrono::system_clock` (ISO 8601).
+  - No git sha (captured by `ingest.py` at ingest time).
+  - Hand-rolled `fprintf` (~15 lines). No JSON library, no third-party deps.
+
+### Tests
+
+- [ ] **2A.8** `tests/test.cu`: add `test_cublas_gemm_fp16` and
+  `test_cublas_gemm_tfloat`. Each: small GEMM (e.g. N=64), compare
+  cuBLAS output vs a host-computed fp64 reference, assert
+  `max_rel_err <= kRelErrTol<T>`. The tfloat test must additionally
+  verify math-mode restore: capture mode before, run `cublas_gemm<float>`,
+  capture mode after, assert unchanged (i.e. `CublasMathModeGuard`
+  restored to `CUBLAS_DEFAULT_MATH`).
+
+### Validation
+
+- [ ] **2A.9** Build + ctest: `cmake -B build && cmake --build build -j
+  && ctest --test-dir build`. All existing checks still pass; new fp16
+  + tfloat cuBLAS tests pass.
+- [ ] **2A.10** `./build/gemm_y` end-to-end: three sweeps run (bf16,
+  fp16, tf32), three CSVs + three `.meta` sidecars written to
+  `results/`. bf16 sweep produces 28 rows as before; fp16 and tf32
+  sweeps produce 14 rows each (cuBLAS only — no custom kernel
+  registered). All rows PASS (cuBLAS vs cuBLAS, err == 0).
 
 ---
 
-## Phase 2B — Plotting (parallel to 2A, no C++ dependency)
+## Phase 2B — Visualization (Python + Plotly + Dash + SQLite)
 
-Goal: visual feedback during kernel optimization. Log-log plot, one
-subplot per `(arch, dtype)`, one line per kernel, cuBLAS as reference.
+Goal: interactive dashboard for benchmark results. Decoupled from C++ —
+consumes the CSV + `.meta` sidecar produced by `./build/gemm_y`, stores
+in SQLite, serves a Dash app at `localhost:8050`.
 
-**Future scope**: the plotting util will be extended in later phases to
-also plot microbench data and other structured outputs. Design it to
-consume CSV with a flexible schema, not hardcode the bench-CSV columns.
+**Stack:** Plotly (interactive hover), Dash (reactive checkboxes/toggles
++ built-in Flask server), SQLite (`sqlite3` stdlib, queryable, git-trackable).
+No matplotlib. DB lives at `db/gemm_y.db`, tracked in git, declared binary
+in `.gitattributes`. CSVs in `results/` stay gitignored (regenerable).
 
-- [ ] **2B.1** `scripts/plot.py` — Python + matplotlib. Reads
-  `results/bench_<arch>_<dtype>.csv`. Outputs `results/plot_<arch>_<dtype>.png`.
-- [ ] **2B.2** `scripts/requirements.txt` — `matplotlib>=3.7`, `pandas>=2.0`.
-- [ ] **2B.3** CLI: `python scripts/plot.py <csv>` → single plot;
-  `python scripts/plot.py <dir>` → all CSVs in dir, one PNG each.
-- [ ] **2B.4** Plot spec: X = N (log), Y = kernel_median_ns (log). One
-  line per `kernel_name`, label = `kernel_desc`. cuBLAS line dashed
-  (distinct color, e.g. black). Custom kernels: solid, Okabe-Ito palette.
-  Title: `GEMM <dtype> on <arch> (lower is better)`. Legend top-right,
-  sorted by median at largest N.
-- [ ] **2B.5** Structure the CSV-reading layer as a reusable module
-  (e.g. `scripts/csv_loader.py`) so future plot types (microbench, etc.)
-  can reuse it.
+**Workflow:**
+```sh
+./build/gemm_y                    # writes results/bench_<arch>_<dtype>.csv + .meta
+source pyenv/bin/activate
+python scripts/ingest.py results/bench_sm_120_bf16.csv [--label "..."]
+python scripts/server.py          # localhost:8050
+python scripts/dump_db.py         # optional JSONL export for human inspection
+```
+
+`ingest.py` auto-discovers the `.meta` sidecar (same path, `.meta`
+extension). Captures `git_sha` via `git rev-parse --short HEAD` at ingest
+time (use case TBD; captured for traceability).
+
+### Tasks
+
+- [ ] **2B.1** `.gitattributes` (new file): `db/gemm_y.db binary`. No
+  `.gitignore` changes (`db/` is not ignored; `results/` stays ignored).
+- [ ] **2B.2** `scripts/requirements.txt`: `dash>=2.14`, `plotly>=5.18`,
+  `pandas>=2.0`. Python 3.14 in `pyenv/`.
+- [ ] **2B.3** `scripts/db.py`: SQLite schema + query layer (pure
+  functions, no Dash dependency). Schema:
+  ```sql
+  CREATE TABLE IF NOT EXISTS runs (
+      id           INTEGER PRIMARY KEY,
+      ingested_at  TEXT NOT NULL,
+      git_sha      TEXT,
+      label        TEXT,
+      arch         TEXT NOT NULL,
+      dtype        TEXT NOT NULL,
+      source_csv   TEXT NOT NULL,
+      source_meta  TEXT NOT NULL,
+      warmup_iters INTEGER,
+      timed_iters  INTEGER,
+      tol          REAL,
+      sweep_sizes  TEXT
+  );
+  CREATE TABLE IF NOT EXISTS measurements (
+      run_id               INTEGER NOT NULL,
+      n                    INTEGER NOT NULL,
+      kernel_name          TEXT NOT NULL,
+      kernel_desc          TEXT NOT NULL,
+      h2d_ns               REAL,
+      kernel_min_ns        REAL,
+      kernel_median_ns     REAL,
+      d2h_ns               REAL,
+      ref_kernel_min_ns    REAL,
+      ref_kernel_median_ns REAL,
+      max_abs_err          REAL,
+      max_rel_err          REAL,
+      FOREIGN KEY (run_id) REFERENCES runs(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_meas_run    ON measurements(run_id);
+  CREATE INDEX IF NOT EXISTS idx_meas_kernel ON measurements(kernel_name);
+  CREATE INDEX IF NOT EXISTS idx_runs_arch_dtype ON runs(arch, dtype);
+  ```
+  `tol` lives in `runs` (per-run, from the `.meta` sidecar), not per-
+  measurement. No `pass` column — every measurement in the DB passed by
+  construction (failed kernels were skipped before CSV write).
+  `is_cublas` derived in Python at query time (`kernel_name == 'cublas'`).
+- [ ] **2B.4** `scripts/ingest.py`: CLI `python ingest.py <csv> [--label
+  <name>]`. Reads the CSV + auto-discovered `.meta` sidecar, appends one
+  row to `runs` (with `ingested_at` timestamp, `git_sha` from
+  `git rev-parse --short HEAD`, optional `label`), appends N rows to
+  `measurements`. Idempotent guard: refuse to re-ingest the same
+  `(source_csv, source_meta, git_sha)` tuple unless `--force`.
+- [ ] **2B.5** `scripts/server.py`: Dash app at `localhost:8050`.
+  Single-page layout, sidebar + tabbed content:
+  - **Sidebar**: arch radio (sm_120 / sm_90), dtype checklist
+    (bf16 / fp16 / tf32), kernel checklist (Custom / cuBLAS), runs
+    multi-select dropdown (populated from `runs` table), scale radio
+    (log-log / linear).
+  - **Tab 1 — Timing**: `kernel_median_ns` vs `N`, one line per
+    (run, kernel). Default log-log; toggle to linear. Hover shows:
+    arch, dtype, custom/ref, kernel name, kernel desc, N, median_ns,
+    ref_median_ns, speedup vs cuBLAS.
+  - **Tab 2 — Accuracy**: `max_rel_err` vs `N` per kernel. Horizontal
+    dashed line at `tol` (from the run's metadata). No error bars.
+  - **Tab 3 — Run History**: table of all runs in the DB (ingested_at,
+    git_sha, label, arch, dtype, kernel count). Selectable for
+    comparison.
+  Plotly `hovertemplate` with `customdata` carrying
+  `[arch, dtype, is_cublas, kernel_desc]`.
+- [ ] **2B.6** `scripts/dump_db.py`: export DB to JSONL (one line per
+  measurement, with run metadata joined). Output to stdout or
+  `db/dump.jsonl` (gitignored — the DB is the source of truth, JSONL is
+  a view for human inspection / diffs).
+
+### Validation
+
+- [ ] **2B.7** End-to-end: `./build/gemm_y` → ingest all three CSVs →
+  launch dashboard → verify all three dtypes appear, cuBLAS lines
+  visible, hover shows correct metadata, log/linear toggle works,
+  accuracy tab shows tol line.
 
 ---
 
@@ -77,10 +228,14 @@ plan in a separate `bf16_tiling_128` branch TODO.
   tile, 8 warps/CTA, `wmma`/`mma.sync` for bf16 on sm_120.
 - [ ] **2C.2** `src/sm90/gemm_bf16_tiled_128.cu` (+ `.cuh`) — same
   algorithm, sm_90 `wmma` API.
-- [ ] **2C.3** Register in `main.cpp` alongside `NaiveGemm<bf16>`. Run
-  sweep, plot, compare vs cuBLAS line. Iterate (one variable per commit
-  per AGENTS.md experiment discipline).
-- [ ] **2C.4** Once bf16 tiled kernel is competitive, replicate ideas to
+- [ ] **2C.3** `src/sm120/gemm_fp16_naive.cu` + `src/sm120/gemm_tfloat_naive.cu`
+  (+ sm90 siblings): `NaiveGemm<fp16>` and `NaiveGemm<tfloat>` so the
+  fp16/tfloat sweeps have a custom kernel to compare against cuBLAS.
+  Register in `main.cpp` alongside `NaiveGemm<bf16>`.
+- [ ] **2C.4** Run sweep, ingest to DB, view in dashboard, compare vs
+  cuBLAS line. Iterate (one variable per commit per AGENTS.md experiment
+  discipline).
+- [ ] **2C.5** Once bf16 tiled kernel is competitive, replicate ideas to
   fp16 (Path 1 sibling). Expect near-identical perf on tensor cores.
 
 ---
@@ -101,3 +256,5 @@ plan in a separate `bf16_tiling_128` branch TODO.
 - Batched, transposed, epilogue-fused, non-square variants (AGENTS.md non-goals).
 - nsys / ncu profiling integration.
 - Multi-GPU / multi-node.
+- fp32 pedantic (CUDA cores) — dropped entirely; only tf32 path for
+  32-bit float storage (see ARD §9).

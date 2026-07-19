@@ -5,14 +5,14 @@ Project spec and contributor guidelines. Read this first.
 ## Project Goal
 
 Write custom CUDA kernels that **match or beat cuBLAS** for GEMM (`C = A × B`)
-on Hopper (sm_90) and Blackwell (sm_120), for `fp16`, `bf16`, and `fp32`.
+on Hopper (sm_90) and Blackwell (sm_120), for `bf16`, `fp16`, and `tf32`.
 
 - **First milestone:** `bf16` GEMM at parity with cuBLAS.
-- **Subsequent milestones:** `fp16`, then `fp32`.
+- **Subsequent milestones:** `fp16`, then `tf32`.
 - **Target hardware:** RTX 5070 (Blackwell, sm_120) for local dev;
   Hopper server (sm_90) for cross-arch validation.
 - **Success metric:** kernel time ≤ cuBLAS time across the full size sweep
-  (see Benchmarking), within the accuracy tolerance (see Open Decisions).
+  (see Benchmarking), within the accuracy tolerance (see ARD §6).
 
 ## Non-Goals (for now)
 
@@ -22,6 +22,8 @@ on Hopper (sm_90) and Blackwell (sm_120), for `fp16`, `bf16`, and `fp32`.
 - Epilogue fusion (`α`, `β`, bias, activation) — plain `C = A × B` only.
 - Lower-precision (`fp8`, `int8`).
 - Multi-GPU or multi-node.
+- **fp32 pedantic (CUDA cores)** — dropped entirely. Only the tf32 path
+  (tensor cores) is implemented for 32-bit float storage. See ARD §9.
 
 ## Tech Stack
 
@@ -36,7 +38,8 @@ on Hopper (sm_90) and Blackwell (sm_120), for `fp16`, `bf16`, and `fp32`.
 ## Tech Stack (Continued)  
 - **cuBLAS** - v2 (CUDA 12.8) to be used
 - **Reference comparison**: compare against `cublasGemmEx` fist, then the goal post will shift to beating `cublasLtMatmul` (the newer, lower-level API) 
-- **Tolerance**: fp32 (pedantic) will run on conventional cuda cores, tf32 (fp32) variant will target Tensor cores, bf16 and fp16 wil target Tensor Cores by default 
+- **Dtypes**: `bf16` and `fp16` target Tensor Cores by default (fp32 accum). `tfloat = float` is the tf32 path (TC, `CUBLAS_TF32_CUBLAS_MATH`); no pedantic fp32 / CUDA-core path. See ARD §9.
+- **Python tooling**: Plotly + Dash + SQLite for the benchmark dashboard. venv at `pyenv/` (Python 3.14). See "Python tooling" under Build Commands.
 
 ## Build Commands
 
@@ -60,6 +63,25 @@ ctest --test-dir build
 # the build). Rely on the strict warning set compiled in by default.
 ```
 
+### Python tooling
+
+The benchmark dashboard (Phase 2B) lives under `scripts/`. It uses a
+project-local venv at `pyenv/` (Python 3.14). Activate before running
+any script:
+
+```sh
+source pyenv/bin/activate
+pip install -r scripts/requirements.txt   # first time only
+python scripts/ingest.py results/bench_sm_120_bf16.csv [--label "..."]
+python scripts/server.py                   # dashboard at localhost:8050
+python scripts/dump_db.py                  # optional JSONL export
+```
+
+Workflow: `./build/gemm_y` writes CSV + `.meta` sidecar to `results/`
+(gitignored). `ingest.py` appends to `db/gemm_y.db` (tracked in git,
+declared binary in `.gitattributes`). `server.py` reads from the DB,
+never from CSV. Git sha is captured by `ingest.py` at ingest time.
+
 Targets:
 - `gemm_y` — main executable (`src/main.cpp` + arch-specific `.cu`).
 - `test_cuda` — build-verification smoke test (`tests/test.cu`).
@@ -72,6 +94,10 @@ gemm_y/
 ├── ARD.md                 # architecture decision record (rationale)
 ├── TODO.md                # forward-looking task list (no completed items)
 ├── CMakeLists.txt         # build system
+├── .gitattributes         # declares db/gemm_y.db as binary
+├── pyenv/                 # Python venv for scripts/ (gitignored via pyenv/.gitignore)
+├── db/
+│   └── gemm_y.db          # SQLite benchmark DB (tracked, binary)
 ├── src/
 │   ├── main.cpp           # entry point
 │   ├── Tracer.h           # host-side timer (steady_clock, C++17)
@@ -80,16 +106,16 @@ gemm_y/
 │   ├── CudaTimer.h        # RAII cudaEvent pair (device timing)
 │   ├── Space.h, Layout.h  # compile-time memory-space / layout tags
 │   ├── Buffer.h, Matrix.h, MatrixView.h, Copy.h
-│   ├── Arch.h, dtypes.h   # arch name + dtype aliases/names
+│   ├── Arch.h, dtypes.h   # arch name + dtype aliases/names (bf16/fp16/tfloat)
 │   ├── bench/             # Profiler, GemmArgs, KernelTraits, Accuracy,
 │   │   ├── Stats.h, Fill.h, CsvWriter.h
 │   │   └── microbench/    # memcpy + launch-overhead microbenches
-│   ├── cublas/            # CublasHandle, cublas_gemm
+│   ├── cublas/            # CublasHandle, CublasMathModeGuard, cublas_gemm
 │   ├── sm90/              # Hopper-specific kernels
 │   └── sm120/             # Blackwell-specific kernels
 ├── tests/
 │   └── test.cu            # unit tests + build-verification
-└── scripts/              # (Phase 2B) plot.py + csv_loader.py
+└── scripts/               # ingest.py, server.py, db.py, dump_db.py, requirements.txt
 ```
 
 ## LLM Context Loading
@@ -124,7 +150,26 @@ Do not load `ARD.md` in full unless reviewing a specific decision.
   macro. Drop comments that restate the code; keep comments that explain
   intent, constraints, or non-obvious tradeoffs.
 
- 
+### Dtype conventions
+- **`tfloat = float`** alias (in `src/dtypes.h`). Always commented at the
+  alias declaration and at every use site with: `// tfloat = tf32 path
+  (TC), not pedantic fp32 (CUDA cores).` The pedantic fp32 / CUDA-core
+  path is dropped entirely — only the tf32 tensor-core path is implemented
+  for 32-bit float storage. See ARD §9.
+- **`CublasTypeMap<T>::math_mode`** selects the cuBLAS math mode per
+  dtype: `CUBLAS_DEFAULT_MATH` for bf16/fp16, `CUBLAS_TF32_CUBLAS_MATH`
+  for tfloat. `cublas_gemm` wraps the call in `CublasMathModeGuard` — no
+  distinct `cublas_gemm_tf32` entry point.
+
+### Accuracy / tolerance
+- **`kRelErrTol<T>`** is a per-dtype compile-time constant
+  (`template <typename T> constexpr double kRelErrTol<T>()`):
+  bf16 → 1e-2, fp16 → 1e-3, tfloat → 1e-3. See ARD §6.
+- **Failed kernels are skipped at the Profiler level**: if
+  `err.max_rel > kRelErrTol<T>`, the row is not written to the CSV
+  (timing of mathematically invalid kernels is meaningless). A stderr
+  FAIL message is printed with N, kernel name, rel_err, tol. The cuBLAS
+  reference row is always written (ground truth, err == 0).
 
 ### CUDA-Specific
 - **Kernel timing**: use `cudaEvent` for device-side timing, **not** the host
@@ -150,10 +195,11 @@ Do not load `ARD.md` in full unless reviewing a specific decision.
   `is_contiguous`/converting ctor), (2) kernel-side POD descriptor (only
   `ptr`/`rows`/`cols`/`ld` read directly). Host methods are **not**
   `__device__`-callable; kernels read fields directly (see ARD §1).
-- **ColMajor invariant**: kernels hardcode ColMajor addressing. Add a
-  `GEMM_Y_ASSERT(args.A/B/C.layout == ColMajor)` in `operator()` before
-  launch — debug-only, one per launch, zero Release cost. Repeat for every
-  future kernel as it lands.
+- **`CublasMathModeGuard`** (free class in `src/cublas/CublasHandle.h`):
+  RAII guard that captures the current math mode via
+  `cublasGetMathMode`, sets a new mode, and restores the previous mode in
+  the dtor. Used by `cublas_gemm` to apply `CublasTypeMap<T>::math_mode`
+  per call. Non-copyable, non-movable. See ARD §9.
 
 ### Warnings
 - Host CXX: full strict set (`-Wall -Wextra -Wpedantic -Wshadow -Wconversion`
@@ -175,12 +221,26 @@ Do not load `ARD.md` in full unless reviewing a specific decision.
   misaligned cases.
 - For each `N`: benchmark both the custom kernel and cuBLAS reference.
 
+### Output artifacts
+- `results/bench_<arch>_<dtype>.csv` — one row per (N, kernel). Failed
+  kernels (rel_err > tol) are absent. Schema documented in ARD §5.
+- `results/bench_<arch>_<dtype>.meta` — key=value sidecar with run
+  metadata (arch, dtype, warmup/timed iters, tol, sweep sizes, kernel
+  list, timestamp). Parsed by `scripts/ingest.py`. No git sha (captured
+  at ingest time).
+- `db/gemm_y.db` — SQLite store of all ingested runs. Tracked in git,
+  declared binary in `.gitattributes`. Source of truth for the dashboard.
 
 ### Visualization
-- **Log-log plot**: x = `N` (log), y = `time_ns` (log).
-- One subplot per `(arch, dtype)`; one line per `kernel`.
-- Reference line: cuBLAS. Goal: custom kernel line ≤ cuBLAS line.
-- Tool: Python + matplotlib (script in `scripts/plot.py`, not yet created).
+- **Tool**: Python + Plotly + Dash + SQLite (see "Python tooling" under
+  Build Commands). No matplotlib.
+- **Dashboard** (`scripts/server.py`, `localhost:8050`): single page,
+  sidebar + three tabs (Timing / Accuracy / Run History). Sidebar
+  filters: arch, dtype, custom-vs-cuBLAS, runs (multi-select), scale
+  (log-log / linear). Hover shows arch, dtype, custom/ref, kernel name,
+  kernel desc, N, median_ns, ref_median_ns, speedup vs cuBLAS.
+- **Default plot**: log-log, `kernel_median_ns` vs `N`. One line per
+  (run, kernel). cuBLAS is the reference line.
 
 ## Experiment Discipline
 
@@ -215,6 +275,8 @@ Do not load `ARD.md` in full unless reviewing a specific decision.
   record. `TODO.md` is forward-looking only.
 - **Never commit** `build/`, `results/`, `*.nsys-rep`, `*.ncu-rep`,
   `compile_commands.json` — all gitignored.
+- **`db/gemm_y.db` IS committed** (tracked, declared binary in
+  `.gitattributes`). It is the durable record of benchmark history.
 
 ## Profiling Tools
 - Profiling will be setup later (nsys & ncu)

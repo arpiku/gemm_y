@@ -175,12 +175,6 @@ conversions — `MatrixView<T,S> -> MatrixView<const T,S>` would fail deduction
 at every call site. The const contract for the reference path is documented
 in `cublas_gemm.h` rather than enforced by the type system.
 
-**ColMajor invariant:** kernels hardcode ColMajor addressing
-(`A.ptr[i + k*A.ld]`). A `GEMM_Y_ASSERT(args.A/B/C.layout == ColMajor)` in
-`operator()` before launch catches silent misconfiguration if a RowMajor
-view ever enters the kernel path. Debug-only, one assert per launch, zero
-Release cost. Repeat for every future kernel as it lands.
-
 ### Alternatives considered
 - **Raw function pointers** (`void(*)(T*,T*,T*,int,int,int)`): rejected.
   - Loses metadata (`name`, `description`) needed for CSV/plotter labels.
@@ -375,45 +369,37 @@ arch,dtype,N,kernel_name,kernel_desc,h2d_ns,kernel_min_ns,kernel_median_ns,d2h_n
 ## 6. Accuracy tolerance
 
 ### Decision
-- Phase 1: `max_rel_err ≤ 1e-2` for bf16 (vs cuBLAS reference).
-- Phase 2 target: tighten to `1e-3` once kernel reduction orders stabilize.
+- Per-dtype compile-time constant: `template <typename T> constexpr
+  double kRelErrTol<T>()` in `src/bench/Accuracy.h`.
+- **Failed kernels are skipped at the Profiler level**: if
+  `err.max_rel > kRelErrTol<T>`, the row is not written to the CSV and a
+  stderr FAIL message is printed (N, kernel name, rel_err, tol). Timing
+  of mathematically invalid kernels is meaningless — storing it would
+  pollute the dashboard. The cuBLAS reference row is always written
+  (ground truth, err == 0).
+
+| Dtype | Storage | Compute | Hardware | Tolerance |
+|-------|---------|---------|----------|-----------|
+| `bf16`   | `__nv_bfloat16` | fp32 accum, tensor cores | TC | 1e-2 |
+| `fp16`   | `__half`        | fp32 accum, tensor cores | TC | 1e-3 |
+| `tfloat` | `float`         | tf32, tensor cores       | TC | 1e-3 |
 
 ### Rationale
-- bf16 with fp32 accumulation (cuBLAS default, and our kernels') typically
-  achieves ~1e-3 max rel err vs an fp64 reference.
-- Comparing two bf16-fp32 implementations (cuBLAS vs custom) with different
-  reduction orders → expect ~1e-4–1e-3 disagreement.
-- **1e-2 is conservative** for Phase 1: covers cuBLAS non-determinism across
-  runs/streams without false negatives, while still catching real bugs (a
-  broken kernel typically produces 1e-1 or worse).
-- Tighten in Phase 2: once kernels are stable and cuBLAS non-determinism is
-  characterized (run cuBLAS vs cuBLAS to measure the floor), set tolerance to
-  `max(1e-3, 10 × cuBLAS_self_err)`.
-
-### Phase 2 per-dtype tolerances
-Phase 2A introduces fp16, fp32-pedantic, and tf32 reference paths. Each
-has a different numerical floor, so `kRelErrTol` is specialized per dtype
-(Phase 1.5 R-adjacent: `Accuracy.h` gains `template <typename T> constexpr
-double kRelErrTol` specializations).
-
-| Path | Storage dtype | Compute | Hardware | Tolerance |
-|------|---------------|---------|----------|-----------|
-| 1 (primary)    | `bf16`  | fp32 accum, tensor cores | TC | 1e-2 |
-| 1 (primary)    | `fp16`  | fp32 accum, tensor cores | TC | 1e-3 |
-| 2 (secondary)  | `fp32`  | tf32, tensor cores       | TC | 1e-3 |
-| 3 (tertiary)   | `fp32`  | fp32, CUDA cores         | CUDA cores | 1e-5 |
-
-Rationale:
-- **bf16** (1e-2): same conservative Phase 1 value; bf16's 8-bit mantissa
-  is the loosest of the four.
+- **bf16** (1e-2): bf16's 8-bit mantissa is the loosest of the three.
+  Conservative — covers cuBLAS non-determinism across runs/streams
+  without false negatives, while still catching real bugs (a broken
+  kernel typically produces 1e-1 or worse).
 - **fp16** (1e-3): tighter mantissa (10 bits) than bf16; cuBLAS fp16
   typically agrees with fp32 reference to ~1e-4.
-- **tf32** (1e-3): tf32 truncates fp32 mantissa to 10 bits (same as fp16)
-  but keeps fp32 range; tensor-core reduction order adds noise. 1e-3 is
-  conservative, matches fp16.
-- **fp32 pedantic** (1e-5): CUDA-core fp32 with fp32 accumulation is the
-  tightest; two correct implementations should agree to ~1e-6. 1e-5
-  leaves headroom for reduction-order divergence.
+- **tfloat** (1e-3): tf32 truncates fp32 mantissa to 10 bits (same as
+  fp16) but keeps fp32 range; tensor-core reduction order adds noise.
+  1e-3 is conservative, matches fp16.
+- **No fp32 pedantic tolerance**: the pedantic CUDA-core path is dropped
+  entirely (see §9). Only the tf32 path exists for 32-bit float storage.
+- **Skip-on-fail policy**: tolerance is a property of the C-matrix check,
+  not a per-row CSV column. The CSV has no `tol` or `pass` column — every
+  row in the CSV passed by construction. The tolerance value is recorded
+  in the `.meta` sidecar (per-run) for documentation.
 
 ---
 
@@ -469,33 +455,46 @@ Rationale:
 - Switching later is a localized change to `src/cublas/cublas_gemm.h` —
   the `Profiler` and kernels are agnostic to which cuBLAS API is used.
 
-### Phase 2A — tf32 path via per-call math mode
-Phase 2A adds the tf32 reference path: `float` storage, tensor-core
-compute via `CUBLAS_TF32_CUBLAS_MATH`. tf32 truncates the fp32 mantissa
-to 10 bits (same as fp16) but keeps fp32 range, so it's a distinct
-compute mode on identical storage.
+### Phase 2A — tf32 path via `CublasTypeMap<T>::math_mode` + `CublasMathModeGuard`
 
-**Design (R-adjacent: 2A.2, 2A.3):**
-- `cublas_gemm_tf32(handle, A, B, C, stream)` is a **distinct entry point**,
-  not an overload of `cublas_gemm`. The storage dtype (`float`) is
-  identical to pedantic fp32; the difference is the math mode, which
-  can't be expressed in the type system. A distinct name makes the
-  intent visible at call sites.
-- `CublasHandle::WithMathMode` is an RAII guard: ctor sets the mode via
-  `cublasSetMathMode`, dtor restores the previous mode. Used by
-  `cublas_gemm_tf32` around the `cublasGemmEx` call. Cleaner than manual
-  save/restore; guarantees restoration even on early-return paths.
+**Decision (revised 2026-07-19):** the pedantic fp32 / CUDA-core path is
+**dropped entirely**. Only the tf32 path exists for 32-bit float storage.
+`tfloat = float` is a dtype alias (in `src/dtypes.h`), always commented:
+`// tfloat = tf32 path (TC), not pedantic fp32 (CUDA cores).`
+
+**Mechanism:**
+- `CublasTypeMap<T>` gains a `static constexpr cublasMath_t math_mode`
+  field per specialization:
+  - `bf16`   → `CUBLAS_DEFAULT_MATH`
+  - `fp16`   → `CUBLAS_DEFAULT_MATH`
+  - `tfloat` → `CUBLAS_TF32_CUBLAS_MATH`
+- `cublas_gemm` wraps the `cublasGemmEx` call in a `CublasMathModeGuard`:
+  ```cpp
+  CublasMathModeGuard guard(handle.get(), TM::math_mode);
+  CUBLAS_CHECK(cublasGemmEx(...));
+  ```
+  For bf16/fp16 this is a no-op (sets DEFAULT_MATH, restores DEFAULT_MATH).
+  For tfloat it sets TF32_CUBLAS_MATH and restores DEFAULT_MATH.
+- **No distinct `cublas_gemm_tf32` entry point** — since there's no
+  pedantic path to distinguish from, `cublas_gemm<float>` *is* the tf32
+  path. The math mode is selected by `CublasTypeMap<T>::math_mode`.
+
+**`CublasMathModeGuard`** (free class in `src/cublas/CublasHandle.h`):
+- RAII: ctor captures prev mode via `cublasGetMathMode`, sets new mode;
+  dtor restores prev mode. Non-copyable, non-movable.
+- Uses `cublasGetMathMode` (not a hardcoded DEFAULT_MATH restore) for
+  robustness — if the handle's default mode ever changes, the guard
+  still restores correctly. Overhead is negligible vs the GEMM call.
 - **Non-thread-safe toggle** (already documented for `CublasHandle` in
   §5.5): the math mode is handle state, so concurrent calls on the same
   handle with different modes would race. Bench is single-threaded; no
   issue. If multi-threaded bench ever lands, one handle per thread.
 
-**Profiler integration (2A.4):** `Profiler<float>` registers a
-`CublasTf32Reference` functor (wrapping `cublas_gemm_tf32`) alongside
-the pedantic fp32 reference. The fp32 CSV then has two reference rows per
-`N` (pedantic + tf32), showing the tensor-core speedup ceiling for fp32
-inputs. Custom fp32/tf32 kernels compare against the appropriate
-reference row.
+**Profiler integration:** `Profiler<float>` (referred to as
+`Profiler<tfloat>` at call sites) registers only the tf32 cuBLAS
+reference. There is no pedantic-vs-tf32 split — one reference row per N
+in the tf32 CSV. Custom tfloat kernels (Phase 2C) compare against this
+reference.
 
 ---
 
@@ -590,56 +589,64 @@ reference row.
 
 ## 12. Phase 2 plan
 
-### 12.1 Three paths (priority order)
-Phase 2 organizes work around three cuBLAS reference + custom-kernel paths:
+### 12.1 Three dtypes (priority order)
+Phase 2 organizes work around three storage dtypes. The pedantic fp32 /
+CUDA-core path is dropped entirely (see §9) — only the tf32 path exists
+for 32-bit float storage.
 
-1. **Path 1 (primary)**: fp16 + bf16, tensor cores, fp32 accumulation.
-   fp16 and bf16 should show **no meaningful perf difference** on
-   Hopper/Blackwell tensor cores (same MMA throughput, same memory layout
-   width). Strategy: optimize one (bf16, as the Phase 1 baseline), then
-   replicate the final kernel's ideas to fp16 with minimal tuning.
-2. **Path 2 (secondary)**: fp32 storage, tf32 compute, tensor cores.
-   Second priority — relevant for fp32-input workloads that can tolerate
-   tf32's mantissa truncation. Same tensor-core MMA as Path 1, different
-   dtype config.
-3. **Path 3 (tertiary, reference-only)**: fp32 pedantic, CUDA cores.
-   May skip custom-kernel optimization entirely (CUDA-core GEMM is
-   bandwidth-bound and cuBLAS is already near-optimal). The reference
-   must exist so any custom kernel can be compared against it.
+1. **bf16 (primary)**: tensor cores, fp32 accumulation. Phase 1 baseline.
+2. **fp16 (primary sibling)**: tensor cores, fp32 accumulation. Should
+   show **no meaningful perf difference** vs bf16 on Hopper/Blackwell
+   tensor cores (same MMA throughput, same memory layout width).
+   Strategy: optimize one (bf16, as the Phase 1 baseline), then replicate
+   the final kernel's ideas to fp16 with minimal tuning.
+3. **tfloat (secondary)**: `tfloat = float` alias. tf32 compute (TC),
+   not pedantic fp32 (CUDA cores). Relevant for fp32-input workloads
+   that can tolerate tf32's mantissa truncation. Same tensor-core MMA
+   as bf16/fp16, different dtype config.
 
-### 12.2 Phase 2A — cuBLAS references for all paths
-- Verify fp32-pedantic path (no code change expected; `CublasTypeMap<float>`
-  already maps correctly).
-- Add `cublas_gemm_tf32` entry point + `CublasHandle::WithMathMode` RAII
-  guard (see §9).
-- `Profiler<float>` registers `CublasTf32Reference` alongside pedantic
-  fp32; fp32 CSV gets two reference rows per N.
-- `main.cpp` runs sweeps for bf16, fp16, fp32 (pedantic + tf32). One CSV
-  per `(arch, dtype)`; tf32 rows live in the fp32 CSV.
-- Per-dtype `kRelErrTol` specializations (see §6 table).
-- Unit tests for fp16/fp32/tf32 cuBLAS paths; tf32 test verifies math-mode
-  restore.
+### 12.2 Phase 2A — cuBLAS references for bf16 / fp16 / tf32
+- `dtypes.h`: add `tfloat = float` alias; `name<float>()` returns
+  `"tf32"`. Drop the fp32 pedantic name.
+- `CublasTypeMap<T>` gains `math_mode` field; `cublas_gemm` wraps the
+  call in `CublasMathModeGuard` (see §9). No distinct
+  `cublas_gemm_tf32` entry point.
+- `kRelErrTol<T>` per-dtype constant; failed kernels skipped at the
+  Profiler level (see §6).
+- `main.cpp` runs three sequential sweeps (bf16, fp16, tfloat). Only
+  `NaiveGemm<bf16>` registered for 2A; fp16/tfloat sweeps are
+  cuBLAS-only. `NaiveGemm<fp16>` / `NaiveGemm<tfloat>` deferred to 2C.
+- `main.cpp` writes a `.meta` sidecar (key=value) alongside each CSV for
+  the Python ingest layer.
+- Unit tests for fp16/tfloat cuBLAS paths; tfloat test verifies
+  math-mode restore.
 
-### 12.3 Phase 2B — Plotting (parallel to 2A, no C++ dependency)
-- `scripts/plot.py` — Python + matplotlib, log-log, one PNG per
-  `(arch, dtype)`. cuBLAS line dashed; custom kernels Okabe-Ito palette.
-- `scripts/requirements.txt` — `matplotlib>=3.7`, `pandas>=2.0`.
-- CLI: single CSV or directory of CSVs.
-- **Future scope**: the plotting util will be extended in later phases to
-  also plot microbench data and other structured outputs. To enable this,
-  the CSV-reading layer is factored as a reusable module
-  (`scripts/csv_loader.py`) with a flexible schema, not hardcoded to the
-  bench-CSV columns. New plot types consume the loader and apply their
-  own column selection.
+### 12.3 Phase 2B — Visualization (Python + Plotly + Dash + SQLite)
+- Stack: Plotly (interactive hover), Dash (reactive checkboxes/toggles
+  + built-in Flask server), SQLite (`sqlite3` stdlib, queryable,
+  git-trackable). No matplotlib.
+- `db/gemm_y.db` tracked in git, declared binary in `.gitattributes`.
+  CSVs in `results/` stay gitignored (regenerable).
+- `scripts/ingest.py` reads CSV + `.meta` sidecar, appends to SQLite.
+  Captures `git_sha` at ingest time.
+- `scripts/server.py` — Dash app at `localhost:8050`. Single page,
+  sidebar + three tabs (Timing / Accuracy / Run History). Sidebar
+  filters: arch, dtype, custom-vs-cuBLAS, runs (multi-select), scale
+  (log-log / linear). Hover shows arch, dtype, custom/ref, kernel name,
+  kernel desc, N, median_ns, ref_median_ns, speedup vs cuBLAS.
+- `scripts/dump_db.py` — optional JSONL export for human inspection.
+- `pyenv/` venv (Python 3.14) for all scripts.
 
 ### 12.4 Phase 2C — First tiled bf16 kernel (after 2A + 2B)
 - `src/sm120/gemm_bf16_tiled_128.cu` (+ `.cuh`) — 128×128 tile, 8 warps/CTA,
   `wmma`/`mma.sync` for bf16 on sm_120.
 - `src/sm90/gemm_bf16_tiled_128.cu` (+ `.cuh`) — same algorithm, sm_90
   `wmma` API.
-- Register in `main.cpp` alongside `NaiveGemm<bf16>`. Run sweep, plot,
-  compare vs cuBLAS line. Iterate per AGENTS.md experiment discipline
-  (one variable per commit).
+- `NaiveGemm<fp16>` and `NaiveGemm<tfloat>` land here (sm90 + sm120) so
+  the fp16/tfloat sweeps have a custom kernel to compare against cuBLAS.
+  Register in `main.cpp` alongside `NaiveGemm<bf16>`.
+- Run sweep, ingest to DB, view in dashboard, compare vs cuBLAS line.
+  Iterate per AGENTS.md experiment discipline (one variable per commit).
 - Once bf16 tiled kernel is competitive, replicate ideas to fp16 (Path 1
   sibling). Expect near-identical tensor-core perf.
 
