@@ -26,6 +26,12 @@ compile_commands.json
 *.qdrep
 *.qdstrm
 *.sqlite
+# JSONL export is a regenerable view; the DB is the source of truth
+db/dump.jsonl
+
+# Python
+__pycache__/
+*.pyc
 
 # IDE / editor
 .vscode/

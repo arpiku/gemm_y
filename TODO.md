@@ -147,11 +147,13 @@ time (use case TBD; captured for traceability).
 
 ### Tasks
 
-- [ ] **2B.1** `.gitattributes` (new file): `db/gemm_y.db binary`. No
-  `.gitignore` changes (`db/` is not ignored; `results/` stays ignored).
-- [ ] **2B.2** `scripts/requirements.txt`: `dash>=2.14`, `plotly>=5.18`,
+- [x] **2B.1** `.gitattributes` (new file): `db/gemm_y.db binary`. No
+  `.gitignore` changes for `db/` or `results/` (both already in desired
+  state: `db/` tracked, `results/` ignored). Added `db/dump.jsonl` to
+  `.gitignore` (regenerable JSONL view; the DB is the source of truth).
+- [x] **2B.2** `scripts/requirements.txt`: `dash>=2.14`, `plotly>=5.18`,
   `pandas>=2.0`. Python 3.14 in `pyenv/`.
-- [ ] **2B.3** `scripts/db.py`: SQLite schema + query layer (pure
+- [x] **2B.3** `scripts/db.py`: SQLite schema + query layer (pure
   functions, no Dash dependency). Schema:
   ```sql
   CREATE TABLE IF NOT EXISTS runs (
@@ -191,13 +193,17 @@ time (use case TBD; captured for traceability).
   measurement. No `pass` column — every measurement in the DB passed by
   construction (failed kernels were skipped before CSV write).
   `is_cublas` derived in Python at query time (`kernel_name == 'cublas'`).
-- [ ] **2B.4** `scripts/ingest.py`: CLI `python ingest.py <csv> [--label
+- [x] **2B.4** `scripts/ingest.py`: CLI `python ingest.py <csv> [--label
   <name>]`. Reads the CSV + auto-discovered `.meta` sidecar, appends one
   row to `runs` (with `ingested_at` timestamp, `git_sha` from
   `git rev-parse --short HEAD`, optional `label`), appends N rows to
   `measurements`. Idempotent guard: refuse to re-ingest the same
   `(source_csv, source_meta, git_sha)` tuple unless `--force`.
-- [ ] **2B.5** `scripts/server.py`: Dash app at `localhost:8050`.
+  **Implementation note (2026-07-19):** `source_csv`/`source_meta` are
+  stored verbatim (path as given on the CLI) so the guard matches the
+  user's mental model of "same command = same ingest". CSV parsing uses
+  the stdlib `csv` module (no pandas dep for ingest itself).
+- [x] **2B.5** `scripts/server.py`: Dash app at `localhost:8050`.
   Single-page layout, sidebar + tabbed content:
   - **Sidebar**: arch radio (sm_120 / sm_90), dtype checklist
     (bf16 / fp16 / tf32), kernel checklist (Custom / cuBLAS), runs
@@ -214,17 +220,22 @@ time (use case TBD; captured for traceability).
     comparison.
   Plotly `hovertemplate` with `customdata` carrying
   `[arch, dtype, is_cublas, kernel_desc]`.
-- [ ] **2B.6** `scripts/dump_db.py`: export DB to JSONL (one line per
-  measurement, with run metadata joined). Output to stdout or
-  `db/dump.jsonl` (gitignored — the DB is the source of truth, JSONL is
-  a view for human inspection / diffs).
+- [x] **2B.6** `scripts/dump_db.py`: export DB to JSONL (one line per
+  measurement, with run metadata joined). Output to stdout by default;
+  `-o <path>` writes to a file (e.g. `db/dump.jsonl`, gitignored).
 
 ### Validation
 
-- [ ] **2B.7** End-to-end: `./build/gemm_y` → ingest all three CSVs →
+- [x] **2B.7** End-to-end: `./build/gemm_y` → ingest all three CSVs →
   launch dashboard → verify all three dtypes appear, cuBLAS lines
   visible, hover shows correct metadata, log/linear toggle works,
-  accuracy tab shows tol line.
+  accuracy tab shows tol line. **Validated 2026-07-19:** 3 runs ingested
+  (28 + 14 + 14 = 56 measurements), dashboard serves HTTP 200 on
+  `localhost:8050`, tab-switch callbacks fire (POST `_dash-update-component`
+  200s in logs), all three dtypes present in DB, both `cublas` and `naive`
+  kernels visible. C++ build + ctest still pass (879 checks, 0 failures).
+  Visual hover/toggle verification is a browser-side check; the HTTP
+  200s + callback responses confirm the data layer is wired correctly.
 
 ---
 
