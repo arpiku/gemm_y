@@ -52,6 +52,9 @@ cmake --build build -j
 # Debug build (-O0 -g)
 cmake -B build -DCMAKE_BUILD_TYPE=Debug
 
+# Run tests (ctest; test_cuda is registered as a single CTest entry)
+ctest --test-dir build
+
 # Note: -Werror is intentionally not supported (nvcc's -Werror requires a
 # <kind> argument and greedily consumes the next flag as its value, breaking
 # the build). Rely on the strict warning set compiled in by default.
@@ -112,6 +115,14 @@ Do not load `ARD.md` in full unless reviewing a specific decision.
   must outlive the consumer. Document at the call site.
 - **No `using namespace` in headers.**
 - **Header guards**: `#pragma once` (already the convention).
+- **No phase trailers in source comments**: do not carry `Phase X.Y`,
+  `RXX`, or `Chunk X.X` tags in source comments. The durable record lives
+  in git history (`git log --grep="Phase: X.X"`) and ARD phase-summary
+  sections. Source comments explain *why*, not *which phase*.
+- **Comment discipline**: prefer one concise explanation at the type/function
+  level over restating the same fact in the header, the helper, and the
+  macro. Drop comments that restate the code; keep comments that explain
+  intent, constraints, or non-obvious tradeoffs.
 
  
 
@@ -129,6 +140,20 @@ Do not load `ARD.md` in full unless reviewing a specific decision.
   matching `GEMM_Y_CUDA_ARCH`.
 - **Warp-level primitives**: prefer `__shfl_sync`, `wmma`/`mma` over
   shared-memory reductions where the arch supports it natively.
+- **Kernel ABI (`GemmArgs<T>`)**: `A`/`B` are `MatrixView<const T, Device>`
+  (read-only inputs), `C` is `MatrixView<T, Device>` (mutable output). Relies
+  on `MatrixView`'s implicit converting ctor (`MatrixView<T,S> ->
+  `MatrixView<const T,S>`) — zero call-site churn. `cublas_gemm` is the
+  exception: it takes writable views for A/B because C++ template argument
+  deduction does not consider implicit conversions (see ARD §3).
+- **`MatrixView` dual-use**: (1) host-side view (`block`/`operator()`/
+  `is_contiguous`/converting ctor), (2) kernel-side POD descriptor (only
+  `ptr`/`rows`/`cols`/`ld` read directly). Host methods are **not**
+  `__device__`-callable; kernels read fields directly (see ARD §1).
+- **ColMajor invariant**: kernels hardcode ColMajor addressing. Add a
+  `GEMM_Y_ASSERT(args.A/B/C.layout == ColMajor)` in `operator()` before
+  launch — debug-only, one per launch, zero Release cost. Repeat for every
+  future kernel as it lands.
 
 ### Warnings
 - Host CXX: full strict set (`-Wall -Wextra -Wpedantic -Wshadow -Wconversion`

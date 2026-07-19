@@ -39,6 +39,16 @@ Three orthogonal concerns are modeled by three types:
 `Space` (`Host` / `Device`) and `Layout` (`ColMajor` / `RowMajor`) are
 **compile-time** template/enum tags, not runtime fields.
 
+**`MatrixView` dual-use contract:** the type serves two roles:
+1. **Host-side view** — `block(r,c,m,n)` (zero-copy sub-view),
+   `operator()(i,j)` (element access), `is_contiguous()` (copy dispatch),
+   converting ctor `MatrixView<T,S> -> MatrixView<const T,S>` (const-correctness).
+2. **Kernel-side POD descriptor** — only `ptr`/`rows`/`cols`/`ld` are read
+   directly (`A.ptr[i + k*A.ld]`). The host methods are **not**
+   `__device__`-callable; kernels read fields directly. This is intentional:
+   the kernel knows its layout at compile time (hardcoded ColMajor in Phase 1)
+   and bypasses the runtime `layout` branch that `operator()` would incur.
+
 ### Alternatives considered
 - **Runtime memory-space tag**: rejected. Loses compile-time dispatch of
   `copy_*`; risks calling `cudaMemcpy` on a host pointer from a device kernel
@@ -60,6 +70,11 @@ Three orthogonal concerns are modeled by three types:
   pre-allocate a single 4096×4096 buffer and feed submatrices to every kernel.
 - `copy_h2d` / `copy_d2h` are the **only** functions that touch `cudaMemcpy*`.
   No hidden data movement anywhere else in the codebase.
+- `GemmArgs<T>` const-correctness: `A`/`B` are `MatrixView<const T, Device>`
+  (read-only inputs), `C` is `MatrixView<T, Device>` (mutable output). Relies
+  on `MatrixView`'s implicit converting ctor — zero call-site churn. `cublas_gemm`
+  is the exception: it takes writable views for A/B because C++ template
+  argument deduction does not consider implicit conversions (see §3).
 
 ---
 
@@ -69,6 +84,14 @@ Three orthogonal concerns are modeled by three types:
 - **Contiguous copies** (`ld == rows` for ColMajor): `cudaMemcpy` (sync).
 - **Strided submatrix copies** (`ld > rows`): `cudaMemcpy2D`.
 - **Async path** (`cudaMemcpyAsync` on explicit stream): not wired in Phase 1.
+- **Direction dispatch**: `detail::copy_kind_v<Dst, Src>` is a `constexpr`
+  variable template mapping the `(Dst, Src)` Space pair to the
+  `cudaMemcpyKind` enum. Only `Host<->Device` specializations are defined;
+  a `static_assert` inside `detail::copy` rejects wrong-direction
+  instantiations (e.g. `copy<Host, Host>`) at compile time. The poison
+  primary template (`cudaMemcpyKind(-1)`) is a defensive secondary net.
+  This makes copy direction a compile-time property of the Space tags,
+  not a runtime argument.
 
 ### Rationale
 - Sync vs async (default stream + sync) are **identical perf** when there is no
@@ -139,7 +162,24 @@ struct NaiveGemm {
 };
 ```
 
-`GemmArgs<T>` is a POD (`{MatrixView<T,Device> A, B, C}`), passed by value.
+`GemmArgs<T>` is a POD (`{MatrixView<const T,Device> A, B,
+MatrixView<T,Device> C}`), passed by value. `A`/`B` are read-only inputs
+(`MatrixView<const T, ...>`); `C` is the mutable output
+(`MatrixView<T, ...>`). The const contract is enforced at the `GemmArgs`
+level via `MatrixView`'s implicit converting ctor — kernels and `Profiler`
+construct `GemmArgs` from writable views with no call-site churn.
+
+`cublas_gemm` is the **exception**: it takes writable `MatrixView<T, Device>`
+for A/B because C++ template argument deduction does not consider implicit
+conversions — `MatrixView<T,S> -> MatrixView<const T,S>` would fail deduction
+at every call site. The const contract for the reference path is documented
+in `cublas_gemm.h` rather than enforced by the type system.
+
+**ColMajor invariant:** kernels hardcode ColMajor addressing
+(`A.ptr[i + k*A.ld]`). A `GEMM_Y_ASSERT(args.A/B/C.layout == ColMajor)` in
+`operator()` before launch catches silent misconfiguration if a RowMajor
+view ever enters the kernel path. Debug-only, one assert per launch, zero
+Release cost. Repeat for every future kernel as it lands.
 
 ### Alternatives considered
 - **Raw function pointers** (`void(*)(T*,T*,T*,int,int,int)`): rejected.
