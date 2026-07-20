@@ -41,6 +41,88 @@ OKABE_ITO = [
 ]
 CUBLAS_COLOR = "#000000"  # black; cuBLAS is the reference line
 
+# The 14-size square sweep (powers of 2 + midpoints). Used as log-x tickvals
+# so every data point has a tick (AGENTS.md Benchmarking Protocol).
+SWEEP_SIZES = [32, 64, 96, 128, 192, 256, 384, 512, 768,
+               1024, 1536, 2048, 3072, 4096]
+
+# Shared visual theme for all figures (TODO 2B.3.2 / 2B.3.3).
+PLOT_BG_COLOR = "#f0f0f0"   # light gray plot area — visible boundary vs white page
+PAPER_BG_COLOR = "#ffffff"  # white margin / page
+GRID_COLOR = "rgba(0,0,0,0.35)"
+BASE_FONT_SIZE = 14
+LEGEND_FONT_SIZE = 12
+
+
+def _axis_layout(log_x: bool, log_y: bool, zeroline_y: bool = False) -> dict:
+    """Shared per-axis grid + tick styling (TODO 2B.3.2).
+
+    - Denser + bolder grid on both axes (gridwidth=2, gridcolor at 35% black).
+    - Outside ticks (width=2, len=6) for a crisper read.
+    - Log-x: tickvals at the 14 sweep sizes so every data point has a tick.
+      Linear-x: leave Plotly auto (sweep sizes are not evenly spaced).
+    - Log-y: dtick='D1' (every decade) — reads well for the 10ns–100ms range.
+    - zeroline_y: when True (Comparison tab), the y=0 parity line is drawn
+      bolder than the grid so it stands out.
+    """
+    xaxis = dict(
+        showgrid=True,
+        gridwidth=2,
+        gridcolor=GRID_COLOR,
+        ticks="outside",
+        tickwidth=2,
+        ticklen=6,
+        zeroline=False,
+    )
+    yaxis = dict(
+        showgrid=True,
+        gridwidth=2,
+        gridcolor=GRID_COLOR,
+        ticks="outside",
+        tickwidth=2,
+        ticklen=6,
+        zeroline=zeroline_y,
+        zerolinewidth=2,
+        zerolinecolor=GRID_COLOR,
+    )
+    if log_x:
+        xaxis["type"] = "log"
+        xaxis["tickvals"] = SWEEP_SIZES
+    else:
+        xaxis["type"] = "linear"
+    if log_y:
+        yaxis["type"] = "log"
+        yaxis["dtick"] = "D1"  # every decade
+    else:
+        yaxis["type"] = "linear"
+    return {"xaxis": xaxis, "yaxis": yaxis}
+
+
+def _base_layout(title: str, x_title: str, y_title: str,
+                 log_x: bool, log_y: bool,
+                 zeroline_y: bool = False) -> dict:
+    """Shared layout dict: axes + theme + font + legend (TODO 2B.3.2 / 2B.3.3).
+
+    Legend font is one step smaller than the base font to keep the legend
+    compact when many runs are selected.
+    """
+    layout = {
+        "title": title,
+        "xaxis_title": x_title,
+        "yaxis_title": y_title,
+        "plot_bgcolor": PLOT_BG_COLOR,
+        "paper_bgcolor": PAPER_BG_COLOR,
+        "font": dict(size=BASE_FONT_SIZE),
+        "legend": dict(
+            orientation="h", y=-0.2, x=0, xanchor="left",
+            font=dict(size=LEGEND_FONT_SIZE),
+        ),
+        "margin": dict(l=60, r=20, t=50, b=80),
+        "height": 520,
+    }
+    layout.update(_axis_layout(log_x, log_y, zeroline_y=zeroline_y))
+    return layout
+
 
 def _is_cublas(kernel_name: str) -> bool:
     return kernel_name == "cublas"
@@ -105,6 +187,10 @@ def _timing_figure(rows: list[dict], log_log: bool) -> go.Figure:
         # are distinguishable.
         label = f"{kname} (run {run_id})"
         # Shared hovertemplate — thousands separator on ns values.
+        # customdata indices (TODO 2B.3.1 — fixed from [4]/[5] to [5]/[6]):
+        #   [0] arch   [1] dtype   [2] class   [3] kernel_desc
+        #   [4] kernel_median_ns   [5] ref_kernel_median_ns
+        #   [6] speedup            [7] perf_pct
         # perf_pct is None for cuBLAS rows; the %{customdata[7]:+.1f} format
         # renders 'nan' for None, so we use a conditional via a separate
         # cuBLAS hovertemplate below.
@@ -116,8 +202,8 @@ def _timing_figure(rows: list[dict], log_log: bool) -> go.Figure:
             "dtype=%{customdata[1]}<br>"
             "class=%{customdata[2]}<br>"
             "desc=%{customdata[3]}<br>"
-            "ref_median=%{customdata[4]:,.0f} ns<br>"
-            "speedup=%{customdata[5]:.3f}x<br>"
+            "ref_median=%{customdata[5]:,.0f} ns<br>"
+            "speedup=%{customdata[6]:.3f}x<br>"
             "perf=%{customdata[7]:+.1f}% vs cuBLAS (+ = faster)"
             "<extra></extra>"
         )
@@ -129,8 +215,8 @@ def _timing_figure(rows: list[dict], log_log: bool) -> go.Figure:
             "dtype=%{customdata[1]}<br>"
             "class=%{customdata[2]}<br>"
             "desc=%{customdata[3]}<br>"
-            "ref_median=%{customdata[4]:,.0f} ns<br>"
-            "speedup=%{customdata[5]:.3f}x<br>"
+            "ref_median=%{customdata[5]:,.0f} ns<br>"
+            "speedup=%{customdata[6]:.3f}x<br>"
             "perf=— (cuBLAS reference)"
             "<extra></extra>"
         )
@@ -165,16 +251,13 @@ def _timing_figure(rows: list[dict], log_log: bool) -> go.Figure:
             )
 
     log_x = log_y = bool(log_log)
-    fig.update_layout(
+    fig.update_layout(**_base_layout(
         title="GEMM timing (lower is better)",
-        xaxis_title="N",
-        yaxis_title="kernel_median_ns",
-        xaxis_type="log" if log_x else "linear",
-        yaxis_type="log" if log_y else "linear",
-        legend=dict(orientation="h", y=-0.2, x=0, xanchor="left"),
-        margin=dict(l=60, r=20, t=50, b=80),
-        height=520,
-    )
+        x_title="N",
+        y_title="kernel_median_ns",
+        log_x=log_x,
+        log_y=log_y,
+    ))
     return fig
 
 
@@ -229,35 +312,34 @@ def _accuracy_figure(rows: list[dict], log_log: bool) -> go.Figure:
             )
         )
 
-    # Tolerance line(s): one per distinct run (tol lives in runs).
-    # Use a faint horizontal line per run; if all tols are equal, they
-    # overlap visually.
-    seen_tols: set[tuple[int, float]] = set()
+    # Tolerance line(s): one per distinct tol value (TODO 2B.3.4).
+    # Previously one add_hline per (run_id, tol) — with 11 runs and 2–3
+    # distinct tols, the annotations stacked at the same corner. Now we
+    # deduplicate by tol and build a combined label listing the dtypes that
+    # share it (e.g. "tol=1e-02 (bf16) / 1e-03 (fp16, tf32)").
+    tol_to_dtypes: dict[float, set[str]] = {}
     for r in rows:
-        key = (r["run_id"], float(r["tol"]) if r["tol"] is not None else -1.0)
-        if key in seen_tols:
-            continue
-        seen_tols.add(key)
         tol = r["tol"]
         if tol is None:
             continue
+        tol_to_dtypes.setdefault(float(tol), set()).add(r["dtype"])
+    # Stable order: descending tol so the largest (loosest) is annotated first.
+    for tol in sorted(tol_to_dtypes, reverse=True):
+        dtypes_sorted = sorted(tol_to_dtypes[tol])
         fig.add_hline(
             y=tol,
             line=dict(color="red", width=1, dash="dot"),
-            annotation_text=f"tol (run {r['run_id']})={tol:g}",
+            annotation_text=f"tol={tol:g} ({', '.join(dtypes_sorted)})",
             annotation_position="top right",
         )
 
-    fig.update_layout(
+    fig.update_layout(**_base_layout(
         title="GEMM accuracy (max_rel_err; lower is better)",
-        xaxis_title="N",
-        yaxis_title="max_rel_err",
-        xaxis_type="log" if log_log else "linear",
-        yaxis_type="log" if log_log else "linear",
-        legend=dict(orientation="h", y=-0.2, x=0, xanchor="left"),
-        margin=dict(l=60, r=20, t=50, b=80),
-        height=520,
-    )
+        x_title="N",
+        y_title="max_rel_err",
+        log_x=log_log,
+        log_y=log_log,
+    ))
     return fig
 
 
@@ -324,16 +406,14 @@ def _comparison_figure(rows: list[dict]) -> go.Figure:
         annotation_position="top left",
     )
 
-    fig.update_layout(
+    fig.update_layout(**_base_layout(
         title="% perf vs cuBLAS (+ = faster; above parity = winning)",
-        xaxis_title="N",
-        yaxis_title="% vs cuBLAS (+ = faster)",
-        xaxis_type="log",  # N spans 32..4096; log x keeps small-N visible
-        yaxis_type="linear",
-        legend=dict(orientation="h", y=-0.2, x=0, xanchor="left"),
-        margin=dict(l=60, r=20, t=50, b=80),
-        height=520,
-    )
+        x_title="N",
+        y_title="% vs cuBLAS (+ = faster)",
+        log_x=True,   # N spans 32..4096; log x keeps small-N visible
+        log_y=False,  # linear y — the percentage is the point (ARD §15)
+        zeroline_y=True,  # parity line at 0 should be visually distinct
+    ))
     return fig
 
 
@@ -396,7 +476,8 @@ def build_app() -> dash.Dash:
 
     app.layout = html.Div(
         style={"display": "flex", "flexDirection": "row", "gap": "16px",
-               "padding": "16px", "fontFamily": "sans-serif"},
+               "padding": "16px", "fontFamily": "sans-serif",
+               "fontSize": 15},  # TODO 2B.3.3: explicit sidebar/page font size
         children=[
             # Sidebar
             html.Div(
@@ -406,7 +487,7 @@ def build_app() -> dash.Dash:
                 children=[
                     html.H3("gemm_y"),
                     html.Div([
-                        html.Label("Arch"),
+                        html.Label("Arch", style={"fontSize": 14}),
                         dcc.RadioItems(
                             id="filter-arch",
                             options=[{"label": a, "value": a} for a in archs],
@@ -415,7 +496,7 @@ def build_app() -> dash.Dash:
                         ),
                     ], style={"marginBottom": "12px"}),
                     html.Div([
-                        html.Label("Dtype"),
+                        html.Label("Dtype", style={"fontSize": 14}),
                         dcc.Checklist(
                             id="filter-dtype",
                             options=[{"label": d, "value": d} for d in dtypes],
@@ -424,7 +505,7 @@ def build_app() -> dash.Dash:
                         ),
                     ], style={"marginBottom": "12px"}),
                     html.Div([
-                        html.Label("Kernel class"),
+                        html.Label("Kernel class", style={"fontSize": 14}),
                         dcc.Checklist(
                             id="filter-class",
                             options=[
@@ -436,7 +517,7 @@ def build_app() -> dash.Dash:
                         ),
                     ], style={"marginBottom": "12px"}),
                     html.Div([
-                        html.Label("Runs"),
+                        html.Label("Runs", style={"fontSize": 14}),
                         dcc.Dropdown(
                             id="filter-runs",
                             options=run_options,
@@ -445,7 +526,7 @@ def build_app() -> dash.Dash:
                         ),
                     ], style={"marginBottom": "12px"}),
                     html.Div([
-                        html.Label("Scale"),
+                        html.Label("Scale", style={"fontSize": 14}),
                         dcc.RadioItems(
                             id="filter-scale",
                             options=[

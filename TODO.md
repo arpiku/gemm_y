@@ -7,88 +7,118 @@
 
 ---
 
-## Phase 2B.2 — Dashboard UX extensions + manual UI review
+## Phase 2B.3 — Dashboard polish round 2 (post-review fixes)
 
-Goal: extend the dashboard with the `% perf vs cuBLAS` comparison metric
-and a run-management CLI, then do the manual UI review against the k0
-data. Triggered after 2C.1.5 (k0 in the DB).
+Goal: fix the functional hover bug surfaced during the 2B.2 review and apply
+the three UI polish items the user reported. Python only; no C++ changes.
 
-**`% perf vs cuBLAS` definition (see ARD §15):**
-```
-perf_pct = (cublas_median_ns - custom_median_ns) / cublas_median_ns * 100
-```
-- `+X%` → custom is X% faster (good). `-X%` → custom is X% slower (bad).
-- `0%` → parity.
-- Label convention: `% vs cuBLAS (+ = faster)` — the sign is non-obvious
-  and must be explicit everywhere it appears (hover, axis title, run
-  history column header).
-- Always display alongside absolute time — the percentage compresses
-  large-N regressions and amplifies small-N noise (cuBLAS at N=32 is
-  launch-overhead dominated; a 5us→50us regression is `-900%`).
+**Context:** Phase 2B.2 (commit `3281428`) shipped the `% perf vs cuBLAS`
+metric, Comparison tab, and `delete_run.py` CLI. The user's manual UI review
+(2B.2.7) found: (a) a hovertemplate `customdata` index bug showing the wrong
+values, (b) sparse/faint grid, (c) low contrast between plot area and page
+background + small font, (d) overlapping tol annotations in the accuracy
+tab's top-right corner.
 
-### Tasks
+### Bug fix (functional)
 
-- [x] **2B.2.1** `scripts/db.py`: add a query helper
-  `measurements_with_perf_pct(conn, run_id)` that joins each custom
-  measurement to its cuBLAS sibling (same `run_id`, same `N`,
-  `kernel_name == 'cublas'`) and computes `perf_pct`. Returns rows with
-  the existing columns + `perf_pct`. cuBLAS rows themselves get
-  `perf_pct = 0` (or NULL — TBD at implementation).
-- [x] **2B.2.2** `scripts/server.py` timing hover: add `perf_pct` to the
-  `customdata` array and to the `hovertemplate`, alongside the existing
-  speedup ratio. Format: `perf=%{customdata[5]:+.1f}% vs cuBLAS`.
-- [x] **2B.2.3** `scripts/server.py` new comparison view: a fourth tab
-  (or a toggle in the Timing tab — TBD) plotting `perf_pct` vs `N`,
-  horizontal line at 0 (parity). Lines above 0 = beating cuBLAS. Default
-  linear y-axis (the percentage is the point; log scale obscures it).
-  Apply the same sidebar filters as the timing tab.
-- [x] **2B.2.4** `scripts/server.py` Run History tab: add a column
-  `median % vs cuBLAS @ N=4096` (largest common sweep size) as a
-  single-number summary per run. Use the `perf_pct` of the run's
-  best custom kernel at N=4096 (or the only custom kernel, for now).
-- [x] **2B.2.5** `scripts/delete_run.py` (new): CLI to manage runs in the
-  DB. Subcommands:
-  - `python scripts/delete_run.py list` — print all runs (id, ingested_at,
-    git_sha, label, arch, dtype, measurement count). Same columns as the
-    Run History tab, plus the count.
-  - `python scripts/delete_run.py delete <id> [<id> ...]` — delete the
-    named run(s) and their measurements (cascading delete via
-    `FOREIGN KEY ... REFERENCES runs(id)`). Confirm prompt before delete
-    unless `--force`.
-  - Refuse to delete if the run is the only one for its `(arch, dtype)`
-    pair unless `--force` (guard against wiping the last baseline).
-  - Print the deleted row count + remaining run count on success.
-- [x] **2B.2.6** `AGENTS.md` Python tooling section: add
-  `python scripts/delete_run.py list|delete <id>...` to the workflow
-  block.
+- [x] **2B.3.1** `scripts/server.py` `_timing_figure`: fix the
+  `customdata` index bug in both the custom and cuBLAS hovertemplates.
+  Current `customdata` layout (L90–102):
+  ```
+  [0] arch   [1] dtype   [2] class   [3] kernel_desc
+  [4] kernel_median_ns   [5] ref_kernel_median_ns
+  [6] speedup            [7] perf_pct
+  ```
+  Current hovertemplate reads `ref_median` from `[4]` (wrong — that's
+  `kernel_median_ns`) and `speedup` from `[5]` (wrong — that's
+  `ref_kernel_median_ns`). Fix to:
+  ```
+  ref_median=%{customdata[5]:,.0f} ns
+  speedup=%{customdata[6]:.3f}x
+  perf=%{customdata[7]:+.1f}% vs cuBLAS (+ = faster)
+  ```
+  Apply to both `hovertemplate` (custom) and `cublas_hovertemplate` (cuBLAS).
+  Verify in the browser: hover a custom point, confirm `ref_median` shows
+  the cuBLAS median at that N (not the kernel's own median) and `speedup`
+  shows the ratio (not the raw ns).
 
-### Manual UI review (after 2B.2.1–2B.2.5 land)
+### UI polish (from user review)
 
-- [ ] **2B.2.7** Run the full pipeline and review in the browser:
+- [x] **2B.3.2** `scripts/server.py`: denser + bolder grid on all three
+  figure builders (`_timing_figure`, `_accuracy_figure`,
+  `_comparison_figure`). Per-axis (x and y):
+  - `showgrid=True`, `gridwidth=2`, `gridcolor="rgba(0,0,0,0.35)"`.
+  - `ticks="outside"`, `tickwidth=2`, `ticklen=6`.
+  - For log-x (N sweep): set `tickvals` to the 14 sweep sizes
+    `[32,64,96,128,192,256,384,512,768,1024,1536,2048,3072,4096]` so
+    every data point has a tick. For linear-x, leave Plotly auto.
+  - For log-y (timing/accuracy): `dtick="D1"` (every decade) or
+    `tick0=10, dtick=10` — pick what reads best for the 10ns–10us range.
+  - `zeroline=True, zerolinewidth=2` on the Comparison tab's y-axis
+    (parity line at 0 should be visually distinct from the grid).
+  - Consider a shared `_axis_layout(log_x, log_y)` helper to avoid
+    repeating the dict across three builders.
+
+- [x] **2B.3.3** `scripts/server.py`: higher contrast plot area vs page
+  background + larger font.
+  - Per-figure `update_layout`: `plot_bgcolor="#f0f0f0"` (light gray
+    plot area), `paper_bgcolor="#ffffff"` (white margin/page).
+    Current default is white-on-white — no visible plot boundary.
+    If `#f0f0f0` is too light, try `#e8e8e8`; the user wants clear
+    contrast with the white page.
+  - Per-figure `update_layout`: `font=dict(size=14)` (default is 12).
+    Apply to title, axis titles, tick labels, legend, hover. If 14 is
+    too large for the legend, set `font=dict(size=14)` globally and
+    `legend=dict(font=dict(size=12))` to keep the legend compact.
+  - App-level: `app.layout`'s root `html.Div` `style` — bump
+    `fontSize` from the browser default (16px) to 15–16px for sidebar
+    labels, or set explicitly via `html.Label(style={"fontSize": 14})`.
+    Current sidebar has no font-size set; it inherits the browser
+    default which varies.
+
+- [x] **2B.3.4** `scripts/server.py` `_accuracy_figure`: fix the
+  overlapping tol annotations in the top-right corner. Root cause:
+  `add_hline(..., annotation_position="top right")` is called once per
+  distinct `(run_id, tol)` — with 11 runs and 2–3 distinct tols (bf16=1e-2,
+  fp16=1e-3, tf32=1e-3), the annotations stack at the same corner.
+  Pick one approach:
+  - **(a) Deduplicate by tol value** (recommended): one `add_hline` per
+    distinct tol, combined label `tol=1e-2 (bf16) / 1e-3 (fp16, tf32)`.
+    Requires grouping runs by tol and building a combined annotation
+    string. Single annotation per tol, no stacking.
+  - **(b) Stagger positions**: rotate `annotation_position` across
+    `["top left", "top center", "top right"]` per distinct tol. Quick
+    but fragile if there are >3 distinct tols.
+  - **(c) Drop annotations, use legend**: add the tol as a legend entry
+    (invisible trace) or into the hover. Cleanest but loses the
+    at-a-glance y-value reference.
+  Implement (a) unless the user prefers otherwise. The dedup logic:
+  collect `{tol: [list of (run_id, dtype)]}` from `rows`, then for each
+  distinct tol, one `add_hline` with `annotation_text` listing the
+  dtypes that share it.
+
+### Validation
+
+- [ ] **2B.3.5** Re-run the dashboard and verify all three tabs in the
+  browser:
   ```sh
-  ./build/gemm_y
   source pyenv/bin/activate
-  python scripts/ingest.py results/bench_sm_120_bf16.csv --label "k0-dummy" --force
-  python scripts/ingest.py results/bench_sm_120_fp16.csv --label "..." --force
-  python scripts/ingest.py results/bench_sm_120_tf32.csv --label "..." --force
-  python scripts/delete_run.py list
   python scripts/server.py
   # → open http://localhost:8050
   ```
-  Verify:
-  - Timing tab: bf16 shows 3 custom lines (NaiveGemm + k0) + 1 cuBLAS;
-    fp16 / tf32 show 1 custom + 1 cuBLAS each.
-  - Hover shows `perf=...% vs cuBLAS` alongside the existing speedup ratio
-    and absolute ns.
-  - New comparison view: `perf_pct` vs `N`, parity line at 0, k0 line
-    hugs 0 (it's a naive copy — should match NaiveGemm's perf_pct).
-  - Run History tab: new `median % vs cuBLAS @ N=4096` column populated.
-  - `delete_run.py list` output matches the Run History tab.
-  - log/linear toggle, accuracy tab tol lines, all prior 2B.1 behavior
-    still works.
-- [ ] **2B.2.8** Collect UI / workflow change suggestions from the user
-  after the review. These feed into a future 2B.3 (TBD scope) — better
-  comparison UX, additional metrics, etc. Not scoped yet.
+  - **Timing tab**: hover a custom point — `ref_median` shows the cuBLAS
+    median (not the kernel's own), `speedup` shows the ratio (not raw ns).
+    Grid is denser + bolder; plot area is visibly distinct from the page
+    background; font is larger.
+  - **Comparison tab**: parity line at 0 is visually distinct; grid +
+    contrast + font consistent with the timing tab.
+  - **Accuracy tab**: no overlapping annotations in the top-right; each
+    distinct tol has one combined label. Grid + contrast + font
+    consistent.
+  - **Run History tab**: unchanged (table, not a figure) — verify the
+    `median % vs cuBLAS @ N=4096` column still populates.
+  - All prior behavior (log/linear toggle, sidebar filters, run
+    multi-select) still works.
 
 ---
 
