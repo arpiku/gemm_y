@@ -17,9 +17,11 @@ metric, Comparison tab, and `delete_run.py` CLI. The user's manual UI review
 (2B.2.7) found: (a) a hovertemplate `customdata` index bug showing the wrong
 values, (b) sparse/faint grid, (c) low contrast between plot area and page
 background + small font, (d) overlapping tol annotations in the accuracy
-tab's top-right corner.
+tab's top-right corner. Round 2 (this phase) addresses the round-1
+follow-up: grid too thick on the accuracy chart, chart too short, hover
+fractions too verbose.
 
-### Bug fix (functional)
+### Bug fix (functional) — done in round 1
 
 - [x] **2B.3.1** `scripts/server.py` `_timing_figure`: fix the
   `customdata` index bug in both the custom and cuBLAS hovertemplates.
@@ -42,7 +44,7 @@ tab's top-right corner.
   the cuBLAS median at that N (not the kernel's own median) and `speedup`
   shows the ratio (not the raw ns).
 
-### UI polish (from user review)
+### UI polish round 1 — done
 
 - [x] **2B.3.2** `scripts/server.py`: denser + bolder grid on all three
   figure builders (`_timing_figure`, `_accuracy_figure`,
@@ -97,6 +99,66 @@ tab's top-right corner.
   distinct tol, one `add_hline` with `annotation_text` listing the
   dtypes that share it.
 
+### UI polish round 2 — from second user review
+
+**Context:** round 1 (2B.3.2–2B.3.4) landed `gridwidth=2` +
+`gridcolor="rgba(0,0,0,0.35)"` uniformly across all three figures. The
+user's second review found: (a) the accuracy chart is now smushed — the
+y-range is tiny (1e-15 to ~1e-3 in log, or 0 to ~1e-2 in linear) so
+`gridwidth=2` merges into a solid block; (b) chart height is hardcoded
+at 520px and feels too short / skewed, especially the accuracy tab;
+(c) hover fractions are too verbose — `speedup=%.3f` (3 decimals),
+`perf_pct=%.1f` (1 decimal), `max_rel_err=%.3e` (3 decimals) — the user
+wants a 2-decimal ceiling across the board.
+
+- [ ] **2B.3.6** `scripts/server.py` `_axis_layout`: parameterize grid
+  weight per figure. Add a `grid_weight: str = "bold"` arg to
+  `_axis_layout` and `_base_layout` (values: `"bold"` / `"light"`).
+  - `"bold"` (timing, comparison): `gridwidth=2`,
+    `gridcolor="rgba(0,0,0,0.35)"`. Keep as-is — these charts have a
+    wide y-range and the bold grid reads fine.
+  - `"light"` (accuracy): `gridwidth=1`,
+    `gridcolor="rgba(0,0,0,0.15)"`. The accuracy y-range is tiny
+    (1e-15 to ~1e-3); `gridwidth=2` merges into a solid block. Lighter
+    grid keeps the chart readable.
+  - `tickwidth` follows `gridwidth` (2 for bold, 1 for light) so the
+    outside ticks match the grid weight.
+  - Pass `grid_weight="light"` from `_accuracy_figure`; default
+    `"bold"` everywhere else.
+
+- [ ] **2B.3.7** `scripts/server.py`: add a chart-height control to the
+  sidebar and thread it through the callback.
+  - Sidebar: new `dcc.RadioItems(id="filter-chart-height", ...)` under
+    the Scale control. Options: `520 / 640 / 760 / 900` (label them
+    "S / M / L / XL" or just the pixel values). Default `640` (bump
+    from the current 520 — the user said the chart is too short).
+  - `_base_layout`: replace the hardcoded `"height": 520` with an
+    `height: int` parameter. Thread it through `_timing_figure`,
+    `_comparison_figure`, `_accuracy_figure`.
+  - `render_tab` callback: add `Input("filter-chart-height", "value")`
+    to the flat `@app.callback` signature (per AGENTS.md "Python /
+    Dash" — flat, not list-wrapped). Pass the value to the figure
+    builders.
+  - Run History tab is a `dt.DataTable`, not a figure — height control
+    does not apply. Leave it unchanged.
+  - This is the "dynamic layout" the user asked for — runtime control
+    over chart height without a server restart.
+
+- [ ] **2B.3.8** `scripts/server.py`: round hover fractions to a
+  2-decimal ceiling across all three figure builders.
+  - `_timing_figure` hovertemplate (custom + cuBLAS):
+    - `speedup=%{customdata[6]:.3f}x` → `speedup=%{customdata[6]:.2f}x`
+    - `perf=%{customdata[7]:+.1f}%` → `perf=%{customdata[7]:+.2f}%`
+    - `median` and `ref_median` stay at `:,.0f` (integer ns — no
+      fraction to round).
+  - `_comparison_figure` hovertemplate:
+    - `perf=%{y:+.1f}%` → `perf=%{y:+.2f}%`
+    - `median` / `ref_median` stay at `:,.0f`.
+  - `_accuracy_figure` hovertemplate:
+    - `max_rel_err=%{y:.3e}` → `max_rel_err=%{y:.2e}`
+  - Consistent 2-decimal ceiling across speedup, perf_pct, max_rel_err.
+    Integer ns values stay integer (no fraction to round).
+
 ### Validation
 
 - [ ] **2B.3.5** Re-run the dashboard and verify all three tabs in the
@@ -119,6 +181,19 @@ tab's top-right corner.
     `median % vs cuBLAS @ N=4096` column still populates.
   - All prior behavior (log/linear toggle, sidebar filters, run
     multi-select) still works.
+- [ ] **2B.3.9** Round-2 validation (after 2B.3.6–2B.3.8 land):
+  - **Accuracy tab**: grid is no longer a solid block — individual grid
+    lines are visible across the tiny y-range. Chart is taller (default
+    640, or whatever the user picks in the sidebar). Hover shows
+    `max_rel_err=X.YZe±NN` (2-decimal scientific).
+  - **Timing tab**: grid weight unchanged from round 1 (bold). Chart
+    height responds to the sidebar control. Hover shows
+    `speedup=X.YZx` and `perf=±X.YZ%` (2 decimals each).
+  - **Comparison tab**: same — 2-decimal `perf`, height responds to
+    sidebar.
+  - **Sidebar**: new "Chart height" control appears under Scale;
+    changing it re-renders the current tab at the new height without a
+    server restart. Run History tab is unaffected.
 
 ---
 
