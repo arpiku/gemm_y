@@ -1,10 +1,11 @@
-// gemm_bf16_naive.cuh — declaration of the Blackwell (sm_120) naive bf16 GEMM
-// kernel functor.
+// gemm_naive.cuh — declaration of the Blackwell (sm_120) naive GEMM kernel
+// functor. Dtype-agnostic (instantiated for bf16 / fp16 / tfloat from one
+// template; casts to fp32 for accumulation, back to T on the write).
 //
 // The struct definition (with name()/description()) lives here so main.cpp
 // (a C++ translation unit) can register it with the Profiler. operator()
-// is only declared here and defined in gemm_bf16_naive.cu (a CUDA TU),
-// because it contains the <<<>>> launch syntax that nvcc must compile.
+// is only declared here and defined in gemm_naive.cu (a CUDA TU), because
+// it contains the <<<>>> launch syntax that nvcc must compile.
 //
 // Perf-irrelevant — exists only to validate the harness end-to-end.
 
@@ -25,7 +26,7 @@ struct NaiveGemm {
         return "naive triple-loop; 1 thread/element; fp32 accum";
     }
 
-    // Defined in gemm_bf16_naive.cu (CUDA translation unit).
+    // Defined in gemm_naive.cu (CUDA translation unit).
     void operator()(GemmArgs<T> args, cudaStream_t stream) const;
 };
 

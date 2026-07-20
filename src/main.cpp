@@ -22,9 +22,11 @@
 #include "dtypes.h"
 
 #if defined(CUDA_ARCH_SM_90)
-    #include "sm90/gemm_bf16_naive.cuh"
+    #include "sm90/gemm_naive.cuh"
+    #include "sm90/gemm_bf16.cuh"
 #elif defined(CUDA_ARCH_SM_120)
-    #include "sm120/gemm_bf16_naive.cuh"
+    #include "sm120/gemm_naive.cuh"
+    #include "sm120/gemm_bf16.cuh"
 #endif
 
 namespace {
@@ -105,11 +107,13 @@ void write_meta(const std::string& meta_path,
 int main() {
     const std::string arch = gemm_y::kArchName;
 
-    // bf16: register NaiveGemm (the existing baseline kernel).
+    // bf16: register NaiveGemm (the existing baseline kernel) and k0
+    // (dummy custom kernel — verbatim naive body; workflow development).
     {
         using T = gemm_y::dtypes::bf16;
         gemm_y::Profiler<T> prof;
         prof.register_kernel<gemm_y::NaiveGemm<T>>();
+        prof.register_kernel<gemm_y::k0>();
         const gemm_y::SweepResult result = prof.run_sweep(kSweepSizes);
 
         const std::string out_csv = "results/bench_" + arch + "_bf16.csv";
@@ -120,6 +124,8 @@ int main() {
         //Register Test Kernels here
         kernels.emplace_back(std::string(gemm_y::NaiveGemm<T>::name()),
                              std::string(gemm_y::NaiveGemm<T>::description()));
+        kernels.emplace_back(std::string(gemm_y::k0::name()),
+                             std::string(gemm_y::k0::description()));
 
 
         write_meta(out_meta, arch, "bf16", 20, 50, gemm_y::kRelErrTol<T>(), kernels);

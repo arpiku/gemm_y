@@ -28,9 +28,9 @@
 #include "cublas/cublas_gemm.h"
 
 #if defined(CUDA_ARCH_SM_90)
-    #include "sm90/gemm_bf16_naive.cuh"
+    #include "sm90/gemm_naive.cuh"
 #elif defined(CUDA_ARCH_SM_120)
-    #include "sm120/gemm_bf16_naive.cuh"
+    #include "sm120/gemm_naive.cuh"
 #endif
 
 namespace {

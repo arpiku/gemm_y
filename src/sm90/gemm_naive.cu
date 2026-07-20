@@ -1,11 +1,11 @@
-// gemm_bf16_naive.cu — Hopper (sm_90) naive GEMM kernel.
+// gemm_naive.cu — Hopper (sm_90) naive GEMM kernel.
 //
-// Identical to src/sm120/gemm_bf16_naive.cu. Per AGENTS.md and ARD.md §8,
+// Identical to src/sm120/gemm_naive.cu. Per AGENTS.md and ARD.md §8,
 // arch-specific code lives in separate .cu files (no #ifdef branches);
 // CMake compiles only the directory matching GEMM_Y_CUDA_ARCH. Divergence
 // between arches begins with tensor-core kernels.
 
-#include "gemm_bf16_naive.cuh"
+#include "gemm_naive.cuh"
 
 #include "bench/GemmArgs.h"
 #include "CudaCheck.h"

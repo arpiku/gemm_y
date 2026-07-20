@@ -1,4 +1,4 @@
-// gemm_bf16_naive.cu — Blackwell (sm_120) naive GEMM kernel.
+// gemm_naive.cu — Blackwell (sm_120) naive GEMM kernel.
 //
 // Triple-loop, 1 thread per C[i][j], inner k loop. ld-aware (reads via
 // ptr + i + k*ld). Accumulate in fp32, cast back to T on write.
@@ -8,7 +8,7 @@
 // The struct declaration lives in the matching .cuh so main.cpp (a C++
 // TU) can register it with the Profiler.
 
-#include "gemm_bf16_naive.cuh"
+#include "gemm_naive.cuh"
 
 #include "bench/GemmArgs.h"
 #include "CudaCheck.h"

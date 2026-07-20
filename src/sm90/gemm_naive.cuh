@@ -1,7 +1,9 @@
-// gemm_bf16_naive.cuh — declaration of the Hopper (sm_90) naive bf16 GEMM
-// kernel functor. Identical to src/sm120/gemm_bf16_naive.cuh; divergence
-// begins with tensor-core kernels (see ARD.md §8).
- #pragma once
+// gemm_naive.cuh — declaration of the Hopper (sm_90) naive GEMM kernel
+// functor. Dtype-agnostic (instantiated for bf16 / fp16 / tfloat from one
+// template). Identical to src/sm120/gemm_naive.cuh; divergence begins with
+// tensor-core kernels (see ARD.md §8).
+
+#pragma once
 
 #include <string_view>
 
@@ -18,7 +20,7 @@ struct NaiveGemm {
         return "naive triple-loop; 1 thread/element; fp32 accum";
     }
 
-    // Defined in gemm_bf16_naive.cu (CUDA translation unit).
+    // Defined in gemm_naive.cu (CUDA translation unit).
     void operator()(GemmArgs<T> args, cudaStream_t stream) const;
 };
 
