@@ -4,9 +4,11 @@
 Served at http://localhost:8050. Reads from db/gemm_y.db (the source of
 truth); never from CSV. Run `ingest.py` first to populate the DB.
 
-Layout: single page, sidebar + three tabs (Timing / Accuracy / Run History).
-Sidebar filters: arch, dtype, kernel class (Custom/cuBLAS), runs
-multi-select, scale (log-log / linear).
+Layout: single page, sidebar + four tabs (Timing / Comparison / Accuracy /
+Run History). Sidebar filters: arch, dtype, kernel class (Custom/cuBLAS),
+runs multi-select, scale (log-log / linear). The Comparison tab plots
+`perf_pct` vs N (ARD §15) with a parity line at 0; it ignores the scale
+toggle (always linear-y, log-x).
 
 The sidebar's run dropdown is populated once at startup. If you ingest new
 runs while the server is running, restart the server to pick them up.
@@ -51,6 +53,19 @@ def _speedup(median: float, ref_median: float) -> float | None:
     return ref_median / median
 
 
+def _perf_pct(row: dict) -> float | None:
+    """Time-reduction % vs cuBLAS (ARD §15). +X = X% faster, -X = X% slower.
+
+    None for cuBLAS rows (undefined for the self-reference)."""
+    val = row.get("perf_pct")
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
 def _timing_figure(rows: list[dict], log_log: bool) -> go.Figure:
     """kernel_median_ns vs N, one line per (run, kernel)."""
     fig = go.Figure()
@@ -81,6 +96,7 @@ def _timing_figure(rows: list[dict], log_log: bool) -> go.Figure:
                 r["kernel_median_ns"],
                 r["ref_kernel_median_ns"],
                 _speedup(r["kernel_median_ns"], r["ref_kernel_median_ns"]),
+                _perf_pct(r),
             ]
             for r in rs_sorted
         ]
@@ -89,6 +105,9 @@ def _timing_figure(rows: list[dict], log_log: bool) -> go.Figure:
         # are distinguishable.
         label = f"{kname} (run {run_id})"
         # Shared hovertemplate — thousands separator on ns values.
+        # perf_pct is None for cuBLAS rows; the %{customdata[7]:+.1f} format
+        # renders 'nan' for None, so we use a conditional via a separate
+        # cuBLAS hovertemplate below.
         hovertemplate = (
             "<b>%{fullData.name}</b><br>"
             "N=%{x}<br>"
@@ -98,7 +117,21 @@ def _timing_figure(rows: list[dict], log_log: bool) -> go.Figure:
             "class=%{customdata[2]}<br>"
             "desc=%{customdata[3]}<br>"
             "ref_median=%{customdata[4]:,.0f} ns<br>"
-            "speedup=%{customdata[5]:.3f}x"
+            "speedup=%{customdata[5]:.3f}x<br>"
+            "perf=%{customdata[7]:+.1f}% vs cuBLAS (+ = faster)"
+            "<extra></extra>"
+        )
+        cublas_hovertemplate = (
+            "<b>%{fullData.name}</b><br>"
+            "N=%{x}<br>"
+            "median=%{y:,.0f} ns<br>"
+            "arch=%{customdata[0]}<br>"
+            "dtype=%{customdata[1]}<br>"
+            "class=%{customdata[2]}<br>"
+            "desc=%{customdata[3]}<br>"
+            "ref_median=%{customdata[4]:,.0f} ns<br>"
+            "speedup=%{customdata[5]:.3f}x<br>"
+            "perf=— (cuBLAS reference)"
             "<extra></extra>"
         )
         if is_cublas:
@@ -112,7 +145,7 @@ def _timing_figure(rows: list[dict], log_log: bool) -> go.Figure:
                     marker=dict(color=CUBLAS_COLOR),
                     opacity=0.6,  # semi-transparent so custom lines show through
                     customdata=customdata,
-                    hovertemplate=hovertemplate,
+                    hovertemplate=cublas_hovertemplate,
                 )
             )
         else:
@@ -228,11 +261,94 @@ def _accuracy_figure(rows: list[dict], log_log: bool) -> go.Figure:
     return fig
 
 
+def _comparison_figure(rows: list[dict]) -> go.Figure:
+    """perf_pct vs N, one line per (run, custom kernel). cuBLAS rows are
+    excluded (perf_pct is None for them). Horizontal parity line at 0.
+
+    Default linear y-axis — the percentage is the point; log scale
+    obscures it (ARD §15, TODO 2B.2.3).
+    """
+    fig = go.Figure()
+    # Only custom rows have a defined perf_pct.
+    custom_rows = [r for r in rows if _perf_pct(r) is not None]
+    series: dict[tuple[int, str], list[dict]] = {}
+    for r in custom_rows:
+        series.setdefault((r["run_id"], r["kernel_name"]), []).append(r)
+
+    color_idx = 0
+    for (run_id, kname), rs in sorted(series.items(), key=lambda kv: (kv[0][1], kv[0][0])):
+        rs_sorted = sorted(rs, key=lambda r: r["n"])
+        xs = [r["n"] for r in rs_sorted]
+        ys = [_perf_pct(r) for r in rs_sorted]
+        customdata = [
+            [
+                r["arch"],
+                r["dtype"],
+                r["kernel_desc"],
+                r["kernel_median_ns"],
+                r["ref_kernel_median_ns"],
+            ]
+            for r in rs_sorted
+        ]
+        color = OKABE_ITO[color_idx % len(OKABE_ITO)]
+        color_idx += 1
+        label = f"{kname} (run {run_id})"
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=ys,
+                mode="lines+markers",
+                name=label,
+                line=dict(color=color),
+                marker=dict(color=color),
+                customdata=customdata,
+                hovertemplate=(
+                    "<b>%{fullData.name}</b><br>"
+                    "N=%{x}<br>"
+                    "perf=%{y:+.1f}% vs cuBLAS (+ = faster)<br>"
+                    "arch=%{customdata[0]}<br>"
+                    "dtype=%{customdata[1]}<br>"
+                    "desc=%{customdata[2]}<br>"
+                    "median=%{customdata[3]:,.0f} ns<br>"
+                    "ref_median=%{customdata[4]:,.0f} ns"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    # Parity line at 0: above = beating cuBLAS, below = slower.
+    fig.add_hline(
+        y=0,
+        line=dict(color=CUBLAS_COLOR, width=1, dash="dash"),
+        annotation_text="parity (0%)",
+        annotation_position="top left",
+    )
+
+    fig.update_layout(
+        title="% perf vs cuBLAS (+ = faster; above parity = winning)",
+        xaxis_title="N",
+        yaxis_title="% vs cuBLAS (+ = faster)",
+        xaxis_type="log",  # N spans 32..4096; log x keeps small-N visible
+        yaxis_type="linear",
+        legend=dict(orientation="h", y=-0.2, x=0, xanchor="left"),
+        margin=dict(l=60, r=20, t=50, b=80),
+        height=520,
+    )
+    return fig
+
+
 def _runs_table() -> list[dict]:
     """Run history rows for the Dash table."""
     conn = db.connect()
     try:
         runs = db.list_runs(conn)
+        # Per-run best custom perf_pct at N=4096 (largest common sweep size).
+        # ARD §15 / TODO 2B.2.4: single-number summary per run.
+        perf_by_run: dict[int, float | None] = {}
+        for r in runs:
+            perf_by_run[r["id"]] = db.best_custom_perf_pct_at_n(
+                conn, r["id"], 4096
+            )
     finally:
         conn.close()
     return [
@@ -244,9 +360,20 @@ def _runs_table() -> list[dict]:
             "arch": r["arch"],
             "dtype": r["dtype"],
             "kernel_count": r["kernel_count"],
+            "median % vs cuBLAS @ N=4096": _format_perf_pct(
+                perf_by_run.get(r["id"])
+            ),
         }
         for r in runs
     ]
+
+
+def _format_perf_pct(val: float | None) -> str:
+    """Format perf_pct for the Run History table. Empty string when None
+    (no custom kernel at N=4096, or cuBLAS missing/zero at N=4096)."""
+    if val is None:
+        return ""
+    return f"{val:+.1f}%"
 
 
 def build_app() -> dash.Dash:
@@ -340,6 +467,7 @@ def build_app() -> dash.Dash:
                         value="timing",
                         children=[
                             dcc.Tab(label="Timing", value="timing"),
+                            dcc.Tab(label="Comparison", value="comparison"),
                             dcc.Tab(label="Accuracy", value="accuracy"),
                             dcc.Tab(label="Run History", value="runs"),
                         ],
@@ -366,7 +494,8 @@ def build_app() -> dash.Dash:
                 columns=[
                     {"name": c, "id": c}
                     for c in ["id", "ingested_at", "git_sha", "label",
-                              "arch", "dtype", "kernel_count"]
+                              "arch", "dtype", "kernel_count",
+                              "median % vs cuBLAS @ N=4096"]
                 ],
                 data=rows,
                 style_table={"overflowX": "auto"},
@@ -390,6 +519,10 @@ def build_app() -> dash.Dash:
         log_log = scale == "log"
         if tab == "timing":
             return dcc.Graph(figure=_timing_figure(rows, log_log))
+        if tab == "comparison":
+            # Comparison view is always linear-y (log obscures the %).
+            # Sidebar filters (arch/dtype/runs/class) still apply.
+            return dcc.Graph(figure=_comparison_figure(rows))
         if tab == "accuracy":
             return dcc.Graph(figure=_accuracy_figure(rows, log_log))
         return html.Div("unknown tab")

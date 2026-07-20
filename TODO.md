@@ -7,92 +7,6 @@
 
 ---
 
-## Phase 2C.0 — Restructure arch kernel files (no logic change)
-
-Goal: rename the dtype-agnostic naive kernel away from its `bf16` misnomer
-and introduce a single shared `.cuh` per arch that declares all
-bf16-specific custom kernels. No kernel logic changes; no perf change.
-Sets the file organization for Phase 2C.1+.
-
-**Rationale:** `NaiveGemm<T>` is dtype-agnostic (casts to fp32, accumulates,
-casts back) and is instantiated for bf16 / fp16 / tfloat from one template
-definition — the `gemm_bf16_naive` filename was always wrong. Tiled TC
-kernels are dtype-specific by nature (wmma fragment types differ per
-dtype), so they belong in a separate `gemm_bf16.cuh` that declares only
-bf16-specific structs. See ARD §16.
-
-- [ ] **2C.0.1** Rename `src/sm120/gemm_bf16_naive.{cuh,cu}` →
-  `src/sm120/gemm_naive.{cuh,cu}`. Mirror in `src/sm90/`.
-- [ ] **2C.0.2** Create `src/sm120/gemm_bf16.cuh` — shared declaration
-  header for all bf16-specific custom kernels on sm_120. Empty of kernel
-  structs for now (populated in 2C.1). Mirror `src/sm90/gemm_bf16.cuh`.
-- [ ] **2C.0.3** Update `#include` in `src/main.cpp` and `tests/test.cu`:
-  `sm{90,120}/gemm_bf16_naive.cuh` → `sm{90,120}/gemm_naive.cuh`.
-  Add `#include "sm{90,120}/gemm_bf16.cuh"` to `main.cpp` (forward decl
-  for the 2C.1 struct; harmless until referenced).
-- [ ] **2C.0.4** Build + ctest: `cmake --build build -j && ctest --test-dir
-  build`. Expect 879/879 (no test changes — `NaiveGemm<T>` symbol is
-  unchanged, only the file name moved).
-
----
-
-## Phase 2C.1 — Dummy `k0` kernel (owner: user)
-
-Goal: land a placeholder custom kernel that is a verbatim copy of the
-naive kernel body, registered alongside `NaiveGemm<bf16>` in `main.cpp`.
-**No optimization.** Purpose: develop the UI / workflow / measurement
-loop against real data before investing in tiled TC kernels.
-
-**Naming convention (see ARD §16):** custom kernels are named `k0`, `k1`,
-`k2`, … during development — the counter tracks iteration progress
-(`k0` ≈ naive-level perf, `k9` faster than `k1`). Switch to descriptive
-names (`Tiled128`, `Tiled128V2`, …) only when a kernel is finalized /
-competitive. `NaiveGemm<T>` stays as the permanent sanity baseline.
-
-**File organization (see ARD §16):** one shared `gemm_bf16.cuh` declares
-all bf16-specific kernel structs; each kernel's `operator()` definition
-lives in its own `gemm_bf16_k<n>.cu` file (compile isolation — a one-line
-edit to `k5` should not recompile `k0`–`k4`). CMake's
-`file(GLOB _gemm_y_arch_sources CONFIGURE_DEPENDS "${arch_dir}/*.cu")`
-auto-picks new `.cu` files; zero CMake changes per kernel.
-
-- [ ] **2C.1.1** Declare `k0` in `src/sm120/gemm_bf16.cuh`:
-  ```cpp
-  // k0 — dummy custom kernel (verbatim naive body). Workflow development
-  // only; no optimization. Perf ≈ NaiveGemm. Rename to descriptive name
-  // when a real strategy lands (see ARD §16).
-  struct k0 {
-      static constexpr std::string_view name()        { return "k0"; }
-      static constexpr std::string_view description() {
-          return "k0: dummy = naive kernel body (workflow development)";
-      }
-      void operator()(GemmArgs<__nv_bfloat16> args,
-                      cudaStream_t stream) const;
-  };
-  ```
-  bf16-only (no template parameter) — tiled/dummy kernels are
-  dtype-specific by nature. Mirror declaration in `src/sm90/gemm_bf16.cuh`.
-- [ ] **2C.1.2** Define `k0::operator()` in `src/sm120/gemm_bf16_k0.cu` —
-  verbatim copy of `NaiveGemm<__nv_bfloat16>::operator()` body (same
-  `naive_gemm_kernel` device function, same launch config). Mirror in
-  `src/sm90/gemm_bf16_k0.cu`.
-- [ ] **2C.1.3** Register in `src/main.cpp` bf16 block, alongside
-  `NaiveGemm<bf16>`:
-  ```cpp
-  prof.register_kernel<gemm_y::NaiveGemm<T>>();
-  prof.register_kernel<gemm_y::k0>();
-  ```
-  fp16 / tfloat blocks unchanged (k0 is bf16-only for now). Update
-  `write_meta` `kernels` list to include `k0`.
-- [ ] **2C.1.4** Build + ctest: expect 879/879 (no test changes — k0 is
-  registered in `main.cpp` only, not exercised by `test.cu`).
-- [ ] **2C.1.5** Run `./build/gemm_y` → bf16 CSV now has 42 rows (14 sizes
-  × 3 kernels: cuBLAS + NaiveGemm + k0). All PASS (k0 is a verbatim naive
-  copy, so accuracy is identical to NaiveGemm). Ingest to DB with
-  `--label "k0-dummy"`.
-
----
-
 ## Phase 2B.2 — Dashboard UX extensions + manual UI review
 
 Goal: extend the dashboard with the `% perf vs cuBLAS` comparison metric
@@ -114,25 +28,25 @@ perf_pct = (cublas_median_ns - custom_median_ns) / cublas_median_ns * 100
 
 ### Tasks
 
-- [ ] **2B.2.1** `scripts/db.py`: add a query helper
+- [x] **2B.2.1** `scripts/db.py`: add a query helper
   `measurements_with_perf_pct(conn, run_id)` that joins each custom
   measurement to its cuBLAS sibling (same `run_id`, same `N`,
   `kernel_name == 'cublas'`) and computes `perf_pct`. Returns rows with
   the existing columns + `perf_pct`. cuBLAS rows themselves get
   `perf_pct = 0` (or NULL — TBD at implementation).
-- [ ] **2B.2.2** `scripts/server.py` timing hover: add `perf_pct` to the
+- [x] **2B.2.2** `scripts/server.py` timing hover: add `perf_pct` to the
   `customdata` array and to the `hovertemplate`, alongside the existing
   speedup ratio. Format: `perf=%{customdata[5]:+.1f}% vs cuBLAS`.
-- [ ] **2B.2.3** `scripts/server.py` new comparison view: a fourth tab
+- [x] **2B.2.3** `scripts/server.py` new comparison view: a fourth tab
   (or a toggle in the Timing tab — TBD) plotting `perf_pct` vs `N`,
   horizontal line at 0 (parity). Lines above 0 = beating cuBLAS. Default
   linear y-axis (the percentage is the point; log scale obscures it).
   Apply the same sidebar filters as the timing tab.
-- [ ] **2B.2.4** `scripts/server.py` Run History tab: add a column
+- [x] **2B.2.4** `scripts/server.py` Run History tab: add a column
   `median % vs cuBLAS @ N=4096` (largest common sweep size) as a
   single-number summary per run. Use the `perf_pct` of the run's
   best custom kernel at N=4096 (or the only custom kernel, for now).
-- [ ] **2B.2.5** `scripts/delete_run.py` (new): CLI to manage runs in the
+- [x] **2B.2.5** `scripts/delete_run.py` (new): CLI to manage runs in the
   DB. Subcommands:
   - `python scripts/delete_run.py list` — print all runs (id, ingested_at,
     git_sha, label, arch, dtype, measurement count). Same columns as the
@@ -144,7 +58,7 @@ perf_pct = (cublas_median_ns - custom_median_ns) / cublas_median_ns * 100
   - Refuse to delete if the run is the only one for its `(arch, dtype)`
     pair unless `--force` (guard against wiping the last baseline).
   - Print the deleted row count + remaining run count on success.
-- [ ] **2B.2.6** `AGENTS.md` Python tooling section: add
+- [x] **2B.2.6** `AGENTS.md` Python tooling section: add
   `python scripts/delete_run.py list|delete <id>...` to the workflow
   block.
 

@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -202,9 +201,20 @@ def fetch_measurements(
                m.ref_kernel_min_ns, m.ref_kernel_median_ns,
                m.max_abs_err, m.max_rel_err,
                r.ingested_at, r.git_sha, r.label, r.arch, r.dtype,
-               r.tol, r.warmup_iters, r.timed_iters
+               r.tol, r.warmup_iters, r.timed_iters,
+               CASE
+                   WHEN m.kernel_name = 'cublas' THEN NULL
+                   ELSE (
+                       (ref.kernel_median_ns - m.kernel_median_ns)
+                       / NULLIF(ref.kernel_median_ns, 0) * 100.0
+                   )
+               END AS perf_pct
           FROM measurements m
           JOIN runs r ON r.id = m.run_id
+          LEFT JOIN measurements ref
+               ON ref.run_id = m.run_id
+              AND ref.n = m.n
+              AND ref.kernel_name = 'cublas'
          WHERE 1=1
     """
     args: list[Any] = []
@@ -241,3 +251,85 @@ def distinct(
             f"SELECT DISTINCT {column} FROM {table} ORDER BY {column}"
         )
         return [row[0] for row in cur.fetchall()]
+
+
+def measurements_with_perf_pct(
+    conn: sqlite3.Connection,
+    run_id: int,
+) -> list[dict[str, Any]]:
+    """Measurements for a run, joined to the run's cuBLAS sibling at the
+    same N, with `perf_pct` computed.
+
+    ``perf_pct = (cublas_median_ns - custom_median_ns) / cublas_median_ns * 100``
+    (ARD §15). Positive = custom faster than cuBLAS.
+
+    cuBLAS rows themselves get ``perf_pct = NULL`` (undefined for the
+    self-reference). The comparison plot draws its own parity line at 0,
+    so a cuBLAS line at 0 would be redundant.
+
+    Returns rows with the existing measurement columns plus ``perf_pct``.
+    """
+    with cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT m.run_id, m.n, m.kernel_name, m.kernel_desc,
+                   m.h2d_ns, m.kernel_min_ns, m.kernel_median_ns, m.d2h_ns,
+                   m.ref_kernel_min_ns, m.ref_kernel_median_ns,
+                   m.max_abs_err, m.max_rel_err,
+                   r.ingested_at, r.git_sha, r.label, r.arch, r.dtype,
+                   r.tol, r.warmup_iters, r.timed_iters,
+                   CASE
+                       WHEN m.kernel_name = 'cublas' THEN NULL
+                       ELSE (
+                           (ref.kernel_median_ns - m.kernel_median_ns)
+                           / NULLIF(ref.kernel_median_ns, 0) * 100.0
+                       )
+                   END AS perf_pct
+              FROM measurements m
+              JOIN runs r ON r.id = m.run_id
+              LEFT JOIN measurements ref
+                   ON ref.run_id = m.run_id
+                  AND ref.n = m.n
+                  AND ref.kernel_name = 'cublas'
+             WHERE m.run_id = ?
+             ORDER BY m.n, m.kernel_name
+            """,
+            (run_id,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+
+def best_custom_perf_pct_at_n(
+    conn: sqlite3.Connection,
+    run_id: int,
+    n: int,
+) -> Optional[float]:
+    """Best (max) perf_pct across the run's custom kernels at the given N.
+
+    Returns None if the run has no custom kernel at N, or if cuBLAS is
+    missing/zero at N (perf_pct undefined). Used by the Run History tab
+    to summarize each run as a single number (ARD §15).
+    """
+    with cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT MAX(
+                (ref.kernel_median_ns - m.kernel_median_ns)
+                / NULLIF(ref.kernel_median_ns, 0) * 100.0
+            ) AS best_perf_pct
+              FROM measurements m
+              JOIN measurements ref
+                   ON ref.run_id = m.run_id
+                  AND ref.n = m.n
+                  AND ref.kernel_name = 'cublas'
+             WHERE m.run_id = ?
+               AND m.n = ?
+               AND m.kernel_name != 'cublas'
+            """,
+            (run_id, n),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        val = row[0]
+        return float(val) if val is not None else None
