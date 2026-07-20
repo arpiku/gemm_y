@@ -46,44 +46,58 @@ CUBLAS_COLOR = "#000000"  # black; cuBLAS is the reference line
 SWEEP_SIZES = [32, 64, 96, 128, 192, 256, 384, 512, 768,
                1024, 1536, 2048, 3072, 4096]
 
-# Shared visual theme for all figures (TODO 2B.3.2 / 2B.3.3).
+# Shared visual theme for all figures (TODO 2B.3.2 / 2B.3.3 / 2B.3.6 / 2B.3.7).
 PLOT_BG_COLOR = "#f0f0f0"   # light gray plot area — visible boundary vs white page
 PAPER_BG_COLOR = "#ffffff"  # white margin / page
-GRID_COLOR = "rgba(0,0,0,0.35)"
 BASE_FONT_SIZE = 14
 LEGEND_FONT_SIZE = 12
 
+# Grid weight presets (TODO 2B.3.6). The accuracy chart's y-range is tiny
+# (1e-15 to ~1e-3); gridwidth=2 merges into a solid block, so it uses the
+# "light" preset. Timing / Comparison use "bold" — wide y-range, bold reads fine.
+_GRID_BOLD = {"gridwidth": 2, "gridcolor": "rgba(0,0,0,0.35)", "tickwidth": 2}
+_GRID_LIGHT = {"gridwidth": 1, "gridcolor": "rgba(0,0,0,0.15)", "tickwidth": 1}
+_GRID_PRESETS = {"bold": _GRID_BOLD, "light": _GRID_LIGHT}
 
-def _axis_layout(log_x: bool, log_y: bool, zeroline_y: bool = False) -> dict:
-    """Shared per-axis grid + tick styling (TODO 2B.3.2).
+# Chart height options (TODO 2B.3.7). Default bumped from 520 to 640 — the
+# user said the chart felt too short, especially the accuracy tab.
+DEFAULT_CHART_HEIGHT = 640
 
-    - Denser + bolder grid on both axes (gridwidth=2, gridcolor at 35% black).
-    - Outside ticks (width=2, len=6) for a crisper read.
+
+def _axis_layout(log_x: bool, log_y: bool, zeroline_y: bool = False,
+                 grid_weight: str = "bold") -> dict:
+    """Shared per-axis grid + tick styling (TODO 2B.3.2 / 2B.3.6).
+
+    - grid_weight: "bold" (timing, comparison — wide y-range) or "light"
+      (accuracy — tiny y-range, gridwidth=2 merges into a solid block).
+      tickwidth follows gridwidth so outside ticks match the grid weight.
+    - Outside ticks (len=6) for a crisper read.
     - Log-x: tickvals at the 14 sweep sizes so every data point has a tick.
       Linear-x: leave Plotly auto (sweep sizes are not evenly spaced).
     - Log-y: dtick='D1' (every decade) — reads well for the 10ns–100ms range.
     - zeroline_y: when True (Comparison tab), the y=0 parity line is drawn
       bolder than the grid so it stands out.
     """
+    grid = _GRID_PRESETS[grid_weight]
     xaxis = dict(
         showgrid=True,
-        gridwidth=2,
-        gridcolor=GRID_COLOR,
+        gridwidth=grid["gridwidth"],
+        gridcolor=grid["gridcolor"],
         ticks="outside",
-        tickwidth=2,
+        tickwidth=grid["tickwidth"],
         ticklen=6,
         zeroline=False,
     )
     yaxis = dict(
         showgrid=True,
-        gridwidth=2,
-        gridcolor=GRID_COLOR,
+        gridwidth=grid["gridwidth"],
+        gridcolor=grid["gridcolor"],
         ticks="outside",
-        tickwidth=2,
+        tickwidth=grid["tickwidth"],
         ticklen=6,
         zeroline=zeroline_y,
         zerolinewidth=2,
-        zerolinecolor=GRID_COLOR,
+        zerolinecolor=grid["gridcolor"],
     )
     if log_x:
         xaxis["type"] = "log"
@@ -100,11 +114,15 @@ def _axis_layout(log_x: bool, log_y: bool, zeroline_y: bool = False) -> dict:
 
 def _base_layout(title: str, x_title: str, y_title: str,
                  log_x: bool, log_y: bool,
-                 zeroline_y: bool = False) -> dict:
-    """Shared layout dict: axes + theme + font + legend (TODO 2B.3.2 / 2B.3.3).
+                 zeroline_y: bool = False,
+                 grid_weight: str = "bold",
+                 height: int = DEFAULT_CHART_HEIGHT) -> dict:
+    """Shared layout dict: axes + theme + font + legend (TODO 2B.3.2 / 2B.3.3 /
+    2B.3.6 / 2B.3.7).
 
     Legend font is one step smaller than the base font to keep the legend
-    compact when many runs are selected.
+    compact when many runs are selected. Height is runtime-configurable via
+    the sidebar's chart-height control (threaded through render_tab).
     """
     layout = {
         "title": title,
@@ -118,9 +136,10 @@ def _base_layout(title: str, x_title: str, y_title: str,
             font=dict(size=LEGEND_FONT_SIZE),
         ),
         "margin": dict(l=60, r=20, t=50, b=80),
-        "height": 520,
+        "height": height,
     }
-    layout.update(_axis_layout(log_x, log_y, zeroline_y=zeroline_y))
+    layout.update(_axis_layout(log_x, log_y, zeroline_y=zeroline_y,
+                               grid_weight=grid_weight))
     return layout
 
 
@@ -148,7 +167,8 @@ def _perf_pct(row: dict) -> float | None:
         return None
 
 
-def _timing_figure(rows: list[dict], log_log: bool) -> go.Figure:
+def _timing_figure(rows: list[dict], log_log: bool,
+                  height: int = DEFAULT_CHART_HEIGHT) -> go.Figure:
     """kernel_median_ns vs N, one line per (run, kernel)."""
     fig = go.Figure()
     # Group rows by (run_id, kernel_name) so each gets its own line.
@@ -191,7 +211,10 @@ def _timing_figure(rows: list[dict], log_log: bool) -> go.Figure:
         #   [0] arch   [1] dtype   [2] class   [3] kernel_desc
         #   [4] kernel_median_ns   [5] ref_kernel_median_ns
         #   [6] speedup            [7] perf_pct
-        # perf_pct is None for cuBLAS rows; the %{customdata[7]:+.1f} format
+        # Hover fractions rounded to a 2-decimal ceiling (TODO 2B.3.8):
+        # speedup %.3f -> %.2f, perf_pct %+.1f -> %+.2f. Integer ns values
+        # stay integer (no fraction to round).
+        # perf_pct is None for cuBLAS rows; the %{customdata[7]:+.2f} format
         # renders 'nan' for None, so we use a conditional via a separate
         # cuBLAS hovertemplate below.
         hovertemplate = (
@@ -203,8 +226,8 @@ def _timing_figure(rows: list[dict], log_log: bool) -> go.Figure:
             "class=%{customdata[2]}<br>"
             "desc=%{customdata[3]}<br>"
             "ref_median=%{customdata[5]:,.0f} ns<br>"
-            "speedup=%{customdata[6]:.3f}x<br>"
-            "perf=%{customdata[7]:+.1f}% vs cuBLAS (+ = faster)"
+            "speedup=%{customdata[6]:.2f}x<br>"
+            "perf=%{customdata[7]:+.2f}% vs cuBLAS (+ = faster)"
             "<extra></extra>"
         )
         cublas_hovertemplate = (
@@ -216,7 +239,7 @@ def _timing_figure(rows: list[dict], log_log: bool) -> go.Figure:
             "class=%{customdata[2]}<br>"
             "desc=%{customdata[3]}<br>"
             "ref_median=%{customdata[5]:,.0f} ns<br>"
-            "speedup=%{customdata[6]:.3f}x<br>"
+            "speedup=%{customdata[6]:.2f}x<br>"
             "perf=— (cuBLAS reference)"
             "<extra></extra>"
         )
@@ -257,11 +280,13 @@ def _timing_figure(rows: list[dict], log_log: bool) -> go.Figure:
         y_title="kernel_median_ns",
         log_x=log_x,
         log_y=log_y,
+        height=height,
     ))
     return fig
 
 
-def _accuracy_figure(rows: list[dict], log_log: bool) -> go.Figure:
+def _accuracy_figure(rows: list[dict], log_log: bool,
+                    height: int = DEFAULT_CHART_HEIGHT) -> go.Figure:
     """max_rel_err vs N per kernel, with a tol line per run.
 
     When all max_rel_err values are 0 (deterministic fill produces
@@ -307,7 +332,8 @@ def _accuracy_figure(rows: list[dict], log_log: bool) -> go.Figure:
                 hovertemplate=(
                     "<b>%{fullData.name}</b><br>"
                     "N=%{x}<br>"
-                    "max_rel_err=%{y:.3e}<extra></extra>"
+                    # 2-decimal scientific (TODO 2B.3.8): %.3e -> %.2e.
+                    "max_rel_err=%{y:.2e}<extra></extra>"
                 ),
             )
         )
@@ -339,11 +365,14 @@ def _accuracy_figure(rows: list[dict], log_log: bool) -> go.Figure:
         y_title="max_rel_err",
         log_x=log_log,
         log_y=log_log,
+        grid_weight="light",  # TODO 2B.3.6: tiny y-range, bold grid merges
+        height=height,
     ))
     return fig
 
 
-def _comparison_figure(rows: list[dict]) -> go.Figure:
+def _comparison_figure(rows: list[dict],
+                      height: int = DEFAULT_CHART_HEIGHT) -> go.Figure:
     """perf_pct vs N, one line per (run, custom kernel). cuBLAS rows are
     excluded (perf_pct is None for them). Horizontal parity line at 0.
 
@@ -387,7 +416,8 @@ def _comparison_figure(rows: list[dict]) -> go.Figure:
                 hovertemplate=(
                     "<b>%{fullData.name}</b><br>"
                     "N=%{x}<br>"
-                    "perf=%{y:+.1f}% vs cuBLAS (+ = faster)<br>"
+                    # 2-decimal perf (TODO 2B.3.8): %+.1f -> %+.2f.
+                    "perf=%{y:+.2f}% vs cuBLAS (+ = faster)<br>"
                     "arch=%{customdata[0]}<br>"
                     "dtype=%{customdata[1]}<br>"
                     "desc=%{customdata[2]}<br>"
@@ -413,6 +443,7 @@ def _comparison_figure(rows: list[dict]) -> go.Figure:
         log_x=True,   # N spans 32..4096; log x keeps small-N visible
         log_y=False,  # linear y — the percentage is the point (ARD §15)
         zeroline_y=True,  # parity line at 0 should be visually distinct
+        height=height,
     ))
     return fig
 
@@ -537,6 +568,23 @@ def build_app() -> dash.Dash:
                             labelStyle={"display": "block"},
                         ),
                     ], style={"marginBottom": "12px"}),
+                    # Chart height control (TODO 2B.3.7): runtime control over
+                    # figure height without a server restart. Default bumped
+                    # from 520 to 640 — the user said the chart felt too short.
+                    html.Div([
+                        html.Label("Chart height", style={"fontSize": 14}),
+                        dcc.RadioItems(
+                            id="filter-chart-height",
+                            options=[
+                                {"label": "S (520)", "value": 520},
+                                {"label": "M (640)", "value": 640},
+                                {"label": "L (760)", "value": 760},
+                                {"label": "XL (900)", "value": 900},
+                            ],
+                            value=DEFAULT_CHART_HEIGHT,
+                            labelStyle={"display": "block"},
+                        ),
+                    ], style={"marginBottom": "12px"}),
                 ],
             ),
             # Main content
@@ -567,8 +615,10 @@ def build_app() -> dash.Dash:
         Input("filter-class", "value"),
         Input("filter-runs", "value"),
         Input("filter-scale", "value"),
+        Input("filter-chart-height", "value"),
     )
-    def render_tab(tab, arch, dtypes_sel, classes, run_ids, scale):
+    def render_tab(tab, arch, dtypes_sel, classes, run_ids, scale,
+                   chart_height):
         if tab == "runs":
             rows = _runs_table()
             return dt.DataTable(
@@ -598,14 +648,17 @@ def build_app() -> dash.Dash:
         finally:
             conn.close()
         log_log = scale == "log"
+        # Chart height is runtime-configurable via the sidebar (TODO 2B.3.7).
+        # Fall back to the default if the control is missing/None.
+        height = chart_height if chart_height else DEFAULT_CHART_HEIGHT
         if tab == "timing":
-            return dcc.Graph(figure=_timing_figure(rows, log_log))
+            return dcc.Graph(figure=_timing_figure(rows, log_log, height=height))
         if tab == "comparison":
             # Comparison view is always linear-y (log obscures the %).
             # Sidebar filters (arch/dtype/runs/class) still apply.
-            return dcc.Graph(figure=_comparison_figure(rows))
+            return dcc.Graph(figure=_comparison_figure(rows, height=height))
         if tab == "accuracy":
-            return dcc.Graph(figure=_accuracy_figure(rows, log_log))
+            return dcc.Graph(figure=_accuracy_figure(rows, log_log, height=height))
         return html.Div("unknown tab")
 
     return app

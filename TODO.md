@@ -111,7 +111,7 @@ at 520px and feels too short / skewed, especially the accuracy tab;
 `perf_pct=%.1f` (1 decimal), `max_rel_err=%.3e` (3 decimals) — the user
 wants a 2-decimal ceiling across the board.
 
-- [ ] **2B.3.6** `scripts/server.py` `_axis_layout`: parameterize grid
+- [x] **2B.3.6** `scripts/server.py` `_axis_layout`: parameterize grid
   weight per figure. Add a `grid_weight: str = "bold"` arg to
   `_axis_layout` and `_base_layout` (values: `"bold"` / `"light"`).
   - `"bold"` (timing, comparison): `gridwidth=2`,
@@ -126,7 +126,7 @@ wants a 2-decimal ceiling across the board.
   - Pass `grid_weight="light"` from `_accuracy_figure`; default
     `"bold"` everywhere else.
 
-- [ ] **2B.3.7** `scripts/server.py`: add a chart-height control to the
+- [x] **2B.3.7** `scripts/server.py`: add a chart-height control to the
   sidebar and thread it through the callback.
   - Sidebar: new `dcc.RadioItems(id="filter-chart-height", ...)` under
     the Scale control. Options: `520 / 640 / 760 / 900` (label them
@@ -144,7 +144,7 @@ wants a 2-decimal ceiling across the board.
   - This is the "dynamic layout" the user asked for — runtime control
     over chart height without a server restart.
 
-- [ ] **2B.3.8** `scripts/server.py`: round hover fractions to a
+- [x] **2B.3.8** `scripts/server.py`: round hover fractions to a
   2-decimal ceiling across all three figure builders.
   - `_timing_figure` hovertemplate (custom + cuBLAS):
     - `speedup=%{customdata[6]:.3f}x` → `speedup=%{customdata[6]:.2f}x`
