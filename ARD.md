@@ -22,6 +22,8 @@
 12. Phase 2 plan
 13. Phase 1.5 refactor inventory
 14. Phase 1.5 validation
+15. `% perf vs cuBLAS` comparison metric
+16. Kernel file organization: shared `.cuh` + per-kernel `.cu`, `k0`/`k1`/… naming
 
 ---
 
@@ -640,22 +642,7 @@ for 32-bit float storage.
 - `scripts/dump_db.py` — optional JSONL export for human inspection.
 - `pyenv/` venv (Python 3.14) for all scripts.
 
-**Dash 4.x callback convention (Phase 2B.1 fix):** the callback
-signature must use the flat form — one `Input(...)` per argument, no
-list wrapping. The list-wrapped form (`[Input(...), Input(...)]`) is
-interpreted by Dash 4.x as a wildcard multi-output, which expects a
-list/tuple return value and raises `InvalidCallbackReturnValue` when
-the callback returns a single component. The flat form works across
-Dash 2.x/3.x/4.x. See AGENTS.md "Python / Dash" for the code pattern.
 
-**Dashboard validation discipline:** a `GET /` returning HTTP 200 only
-confirms the static layout serves. Always fire a real callback POST
-(tab switch, filter change) to verify the interactive layer — either
-via browser devtools or `curl -X POST localhost:8050/_dash-update-component`.
-
-### 12.4 Phase 2C — First tiled bf16 kernel (after 2A + 2B)
-- `src/sm120/gemm_bf16_tiled_128.cu` (+ `.cuh`) — 128×128 tile, 8 warps/CTA,
-  `wmma`/`mma.sync` for bf16 on sm_120.
 - `src/sm90/gemm_bf16_tiled_128.cu` (+ `.cuh`) — same algorithm, sm_90
   `wmma` API.
 - `NaiveGemm<fp16>` and `NaiveGemm<tfloat>` land here (sm90 + sm120) so
@@ -718,3 +705,129 @@ cleanup was made. Items map to `TODO.md` Phase 1.5 R1–R20.
 #
 # Phase history: git log --grep="Phase: 1.5"
 ```
+
+## 15. `% perf vs cuBLAS` comparison metric
+
+### Decision
+
+The primary comparison metric for custom kernels vs the cuBLAS reference
+is the **time-reduction percentage**:
+
+```
+perf_pct = (cublas_median_ns - custom_median_ns) / cublas_median_ns * 100
+```
+
+- `+X%` → custom kernel is X% faster than cuBLAS (good).
+- `-X%` → custom kernel is X% slower than cuBLAS (bad).
+- `0%` → parity.
+
+Sign convention: **positive = faster**. This is opposite to the naive
+"time increase %" reading, so the label must be explicit everywhere it
+appears (hover, axis title, run history column): `% vs cuBLAS (+ = faster)`.
+
+### Rationale
+
+- Matches the verbal framing ("10% faster" = 10% less time).
+- Centers the comparison on parity (`0%`), making convergence-to-cuBLAS
+  visible at a glance — a `perf_pct` vs `N` plot with a horizontal line
+  at 0 is the canonical "are we winning" view.
+- Complements (does not replace) the existing speedup ratio
+  (`cublas / custom`, `1.1x` = faster) already in the dashboard hover.
+  The ratio is standard in HPC papers; the percentage is more readable
+  for humans. Both are shown.
+
+### Caveats
+
+- **Asymmetry at small N.** cuBLAS at N=32 is launch-overhead dominated
+  (~5us); a custom kernel at 50us is `-900%`. At N=4096, cuBLAS ~1000us,
+  custom ~1100us → `-10%`. The percentage compresses large-N regressions
+  and amplifies small-N noise. **Always display alongside absolute time**
+  (median_ns) — the percentage alone is misleading at small N.
+- **cuBLAS rows themselves.** `perf_pct` is undefined for the cuBLAS
+  reference row (it is its own reference). Implementation choice: cuBLAS
+  rows get `perf_pct = 0` (or NULL — TBD at implementation time, see
+  TODO 2B.2.1).
+
+### Future: TFLOPS
+
+Deferred to a later sub-phase. Definition will be:
+```
+tflops    = 2 * N^3 / (median_ns * 1e-9) / 1e12
+%_of_peak = tflops / peak_tflops[arch][dtype] * 100
+```
+Needs a peak-TFLOPS lookup per `(arch, dtype)` (RTX 5070 bf16 TC peak,
+H100 bf16 TC peak, etc.). Not blocked by the `% perf vs cuBLAS` metric —
+the two are independent.
+
+## 16. Kernel file organization: shared `.cuh` + per-kernel `.cu`, `k0`/`k1`/… naming
+
+### Decision
+
+Arch-specific custom kernels live under `src/sm90/` and `src/sm120/`
+(one binary per arch, per §8). Within each arch dir:
+
+- **`gemm_naive.{cuh,cu}`** — the dtype-agnostic `NaiveGemm<T>` template.
+  Renamed from `gemm_bf16_naive.{cuh,cu}` (the `bf16` was a misnomer —
+  the template is instantiated for bf16 / fp16 / tfloat from one
+  definition; it was never bf16-specific).
+- **`gemm_bf16.cuh`** — shared declaration header for all **bf16-specific**
+  custom kernels. Each struct declares `name()`, `description()`, and
+  `operator()(GemmArgs<__nv_bfloat16>, cudaStream_t) const` (no template
+  parameter — tiled TC kernels are dtype-specific by nature). Mirror in
+  `src/sm90/gemm_bf16.cuh`.
+- **`gemm_bf16_k<n>.cu`** — one `.cu` per kernel definition. Each owns
+  its own `operator()` body and its own explicit instantiation
+  (`template struct ...` if templated, or just the struct definition if
+  bf16-only). CMake's `file(GLOB _gemm_y_arch_sources CONFIGURE_DEPENDS
+  "${arch_dir}/*.cu")` auto-picks new `.cu` files — zero CMake changes
+  per kernel.
+
+### Naming convention
+
+Custom kernels are named `k0`, `k1`, `k2`, … **during development**. The
+counter tracks iteration progress: `k0` ≈ naive-level perf (first
+attempt), `k9` faster than `k1`. The counter is the user's progress
+ruler, not the permanent identity.
+
+Switch to **descriptive names** (`Tiled128`, `Tiled128V2`,
+`DoubleBuffer256`, …) when a kernel is finalized / competitive. Use a
+`V2`/`V3` suffix when iterating on the *same* strategy (one variable
+per commit per AGENTS.md experiment discipline), not a global counter.
+
+`NaiveGemm<T>` stays as the permanent sanity baseline — it is not `k0`.
+The first custom kernel (`k0`) is a distinct struct, registered
+alongside `NaiveGemm` in `main.cpp`.
+
+### Rationale
+
+- **One shared `.cuh`** avoids per-kernel header proliferation (the
+  user's stated objection). Declarations are cheap; definitions are
+  where the complexity lives.
+- **One `.cu` per kernel** gives compile isolation — a one-line edit to
+  `k5`'s inner loop should not recompile `k0`–`k4`. nvcc is slow;
+  per-kernel TUs keep the edit-compile-test loop tight. This is the
+  standard C++ declaration/definition split, with the declaration shared.
+  It is not "multiple files per kernel" in the sense the user objected
+  to — each kernel has exactly one file (its `.cu`); the `.cuh` is shared.
+- **`k0`/`k1`/… counter naming** is intuitive to the user as a progress
+  ruler. Descriptive naming is reserved for finalized kernels to avoid
+  premature commitment to a strategy label.
+- **bf16-only structs (no template)** reflects that tiled TC kernels are
+  dtype-specific. `NaiveGemm<T>` stays templated because it is genuinely
+  generic. Forcing tiled kernels into a template would require
+  dtype-conditional `wmma`/`mma` fragment types — worse than separate
+  structs per dtype.
+
+### Consequences
+
+- Adding a kernel = 1 new `.cu` + a few lines in `gemm_bf16.cuh` + 1
+  line in `main.cpp`. Zero CMake changes.
+- Declaring a struct in `gemm_bf16.cuh` without a matching `.cu`
+  definition → link error on `operator()`. The `KernelTraits_v` SFINAE
+  check only validates the declaration, not the definition. Acceptable
+  for a small project; just be aware.
+- `tests/test.cu` uses the same `#if defined(CUDA_ARCH_SM_120)` /
+  `#elif defined(CUDA_ARCH_SM_90)` include switch as `main.cpp`. Any
+  new header (`gemm_bf16.cuh`) needs an include there too if unit tests
+  for tiled kernels are desired. Defer until the kernel passes accuracy
+  — the Profiler-level sweep already catches accuracy failures.

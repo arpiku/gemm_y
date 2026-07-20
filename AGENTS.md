@@ -75,6 +75,8 @@ pip install -r scripts/requirements.txt   # first time only
 python scripts/ingest.py results/bench_sm_120_bf16.csv [--label "..."]
 python scripts/server.py                   # dashboard at localhost:8050
 python scripts/dump_db.py                  # optional JSONL export
+python scripts/delete_run.py list          # list all runs in the DB
+python scripts/delete_run.py delete <id>   # delete a run + its measurements
 ```
 
 Workflow: `./build/gemm_y` writes CSV + `.meta` sidecar to `results/`
@@ -183,6 +185,14 @@ Do not load `ARD.md` in full unless reviewing a specific decision.
 - **Arch-specific code**: prefer separate `.cu` files under `src/sm90/` and
   `src/sm120/` over `#ifdef` branches. CMake only compiles the directory
   matching `GEMM_Y_CUDA_ARCH`.
+- **Kernel file organization** (see ARD §16): within each arch dir,
+  `gemm_naive.{cuh,cu}` holds the dtype-agnostic `NaiveGemm<T>`
+  template; `gemm_bf16.cuh` is the shared declaration header for all
+  bf16-specific custom kernels; each kernel's `operator()` definition
+  lives in its own `gemm_bf16_k<n>.cu` (compile isolation). Custom
+  kernels are named `k0`, `k1`, … during development (counter = progress
+  ruler); switch to descriptive names (`Tiled128`, `Tiled128V2`, …) when
+  finalized. `NaiveGemm<T>` is the permanent sanity baseline, not `k0`.
 - **Warp-level primitives**: prefer `__shfl_sync`, `wmma`/`mma` over
   shared-memory reductions where the arch supports it natively.
 - **Kernel ABI (`GemmArgs<T>`)**: `A`/`B` are `MatrixView<const T, Device>`
@@ -211,34 +221,6 @@ Do not load `ARD.md` in full unless reviewing a specific decision.
 - `-Werror` is not supported (nvcc's `-Werror` requires a `<kind>` argument
   and greedily consumes the next flag as its value, breaking the build).
   Rely on the strict warning set compiled in by default.
-
-### Python / Dash
-- **Dash callback signature**: use the flat form — one `Input(...)` per
-  argument, no list wrapping. The list-wrapped form
-  (`[Input(...), Input(...)]`) is interpreted by Dash 4.x as a wildcard
-  multi-output, which expects a list/tuple return value and raises
-  `InvalidCallbackReturnValue` when the callback returns a single
-  component. The flat form works across Dash 2.x/3.x/4.x.
-  ```python
-  # Correct (flat):
-  @app.callback(
-      Output("tab-content", "children"),
-      Input("tabs", "value"),
-      Input("filter-arch", "value"),
-  )
-  def render_tab(tab, arch): ...
-
-  # Wrong (list-wrapped — breaks on Dash 4.x):
-  @app.callback(
-      Output("tab-content", "children"),
-      [Input("tabs", "value"),
-       Input("filter-arch", "value")],
-  )
-  ```
-- **Dashboard validation**: a `GET /` returning HTTP 200 only confirms
-  the static layout serves. Always fire a real callback POST (tab switch,
-  filter change) to verify the interactive layer — either via browser
-  devtools or `curl -X POST localhost:8050/_dash-update-component`.
 
 ## Benchmarking Protocol
 
