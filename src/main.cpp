@@ -117,11 +117,17 @@ int main() {
         std::printf("gemm_y: arch=%s dtype=bf16  out=%s\n", arch.c_str(), out_csv.c_str());
         write_csv(result, out_csv);
         std::vector<std::pair<std::string, std::string>> kernels;
+        //Register Test Kernels here
         kernels.emplace_back(std::string(gemm_y::NaiveGemm<T>::name()),
                              std::string(gemm_y::NaiveGemm<T>::description()));
+
+
         write_meta(out_meta, arch, "bf16", 20, 50, gemm_y::kRelErrTol<T>(), kernels);
         std::printf("gemm_y: done. %zu rows written to %s\n", result.rows.size(), out_csv.c_str());
     }
+
+
+
 
     // fp16: register NaiveGemm (custom kernel for comparison vs cuBLAS).
     {
