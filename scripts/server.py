@@ -42,24 +42,22 @@ OKABE_ITO = [
 CUBLAS_COLOR = "#000000"  # black; cuBLAS is the reference line
 
 # The 14-size square sweep (powers of 2 + midpoints). Used as log-x tickvals
-# so every data point has a tick (AGENTS.md Benchmarking Protocol).
 SWEEP_SIZES = [32, 64, 96, 128, 192, 256, 384, 512, 768,
                1024, 1536, 2048, 3072, 4096]
 
-# Shared visual theme for all figures (TODO 2B.3.2 / 2B.3.3 / 2B.3.6 / 2B.3.7).
-PLOT_BG_COLOR = "#f0f0f0"   # light gray plot area — visible boundary vs white page
-PAPER_BG_COLOR = "#ffffff"  # white margin / page
+#PLOT_BG_COLOR = "#f0f0f0"   # light gray plot area — visible boundary vs white page
+#PAPER_BG_COLOR = "#ffffff"  # white margin / page
+
+PLOT_BG_COLOR = "#ffffff"   # light gray plot area — visible boundary vs white page
+PAPER_BG_COLOR = "#f0f0f0"  # white margin / page
+
 BASE_FONT_SIZE = 14
 LEGEND_FONT_SIZE = 12
 
-# Grid weight presets (TODO 2B.3.6). The accuracy chart's y-range is tiny
-# (1e-15 to ~1e-3); gridwidth=2 merges into a solid block, so it uses the
-# "light" preset. Timing / Comparison use "bold" — wide y-range, bold reads fine.
-_GRID_BOLD = {"gridwidth": 2, "gridcolor": "rgba(0,0,0,0.35)", "tickwidth": 2}
+_GRID_BOLD = {"gridwidth": 1, "gridcolor": "rgba(0,0,0,0.35)", "tickwidth": 1}
 _GRID_LIGHT = {"gridwidth": 1, "gridcolor": "rgba(0,0,0,0.15)", "tickwidth": 1}
 _GRID_PRESETS = {"bold": _GRID_BOLD, "light": _GRID_LIGHT}
 
-# Chart height options (TODO 2B.3.7). Default bumped from 520 to 640 — the
 # user said the chart felt too short, especially the accuracy tab.
 DEFAULT_CHART_HEIGHT = 640
 
@@ -576,10 +574,10 @@ def build_app() -> dash.Dash:
                         dcc.RadioItems(
                             id="filter-chart-height",
                             options=[
-                                {"label": "S (520)", "value": 520},
-                                {"label": "M (640)", "value": 640},
-                                {"label": "L (760)", "value": 760},
-                                {"label": "XL (900)", "value": 900},
+                                {"label": "S (640)", "value": 640},
+                                {"label": "M (760)", "value": 760},
+                                {"label": "L (900)", "value": 900},
+                                {"label": "XL (1160)", "value": 1160},
                             ],
                             value=DEFAULT_CHART_HEIGHT,
                             labelStyle={"display": "block"},

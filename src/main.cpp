@@ -102,75 +102,84 @@ void write_meta(const std::string& meta_path,
     std::fclose(f);
 }
 
-} // namespace
+}
+
+void profile_bf16_kernels(const std::string& arch) {
+    using T = gemm_y::dtypes::bf16;
+    gemm_y::Profiler<T> prof;
+    prof.register_kernel<gemm_y::NaiveGemm<T>>();
+    prof.register_kernel<gemm_y::k0>();
+    const gemm_y::SweepResult result = prof.run_sweep(kSweepSizes);
+
+    const std::string out_csv = "results/bench_" + arch + "_bf16.csv";
+    const std::string out_meta = "results/bench_" + arch + "_bf16.meta";
+    std::printf("gemm_y: arch=%s dtype=bf16  out=%s\n", arch.c_str(), out_csv.c_str());
+    write_csv(result, out_csv);
+    std::vector<std::pair<std::string, std::string>> kernels;
+
+    //Register Test Kernels here
+    kernels.emplace_back(std::string(gemm_y::NaiveGemm<T>::name()),
+                            std::string(gemm_y::NaiveGemm<T>::description()));
+    kernels.emplace_back(std::string(gemm_y::k0::name()),
+                            std::string(gemm_y::k0::description()));
+
+
+    write_meta(out_meta, arch, "bf16", 20, 50, gemm_y::kRelErrTol<T>(), kernels);
+    std::printf("gemm_y: done. %zu rows written to %s\n", result.rows.size(), out_csv.c_str());
+}
+
+
+// TODO: Optimize the fp16 kernels, after bf16
+void profile_fp16_kernels(const std::string& arch) {
+    using T = gemm_y::dtypes::fp16;
+    gemm_y::Profiler<T> prof;
+    prof.register_kernel<gemm_y::NaiveGemm<T>>();
+    const gemm_y::SweepResult result = prof.run_sweep(kSweepSizes);
+
+    const std::string out_csv = "results/bench_" + arch + "_fp16.csv";
+    const std::string out_meta = "results/bench_" + arch + "_fp16.meta";
+    std::printf("gemm_y: arch=%s dtype=fp16  out=%s\n", arch.c_str(), out_csv.c_str());
+    write_csv(result, out_csv);
+    std::vector<std::pair<std::string, std::string>> kernels;
+    kernels.emplace_back(std::string(gemm_y::NaiveGemm<T>::name()),
+                            std::string(gemm_y::NaiveGemm<T>::description()));
+    write_meta(out_meta, arch, "fp16", 20, 50, gemm_y::kRelErrTol<T>(), kernels);
+    std::printf("gemm_y: done. %zu rows written to %s\n", result.rows.size(), out_csv.c_str());
+}
+
+// TODO: Optimize the tf32 kernels, after fp16
+void profile_tf32_kernels(const std::string& arch) {
+    using T = gemm_y::dtypes::tfloat;
+    gemm_y::Profiler<T> prof;
+    prof.register_kernel<gemm_y::NaiveGemm<T>>();
+    const gemm_y::SweepResult result = prof.run_sweep(kSweepSizes);
+
+    const std::string out_csv = "results/bench_" + arch + "_tf32.csv";
+    const std::string out_meta = "results/bench_" + arch + "_tf32.meta";
+    std::printf("gemm_y: arch=%s dtype=tf32  out=%s\n", arch.c_str(), out_csv.c_str());
+    write_csv(result, out_csv);
+    std::vector<std::pair<std::string, std::string>> kernels;
+    kernels.emplace_back(std::string(gemm_y::NaiveGemm<T>::name()),
+                            std::string(gemm_y::NaiveGemm<T>::description()));
+    write_meta(out_meta, arch, "tf32", 20, 50, gemm_y::kRelErrTol<T>(), kernels);
+    std::printf("gemm_y: done. %zu rows written to %s\n", result.rows.size(), out_csv.c_str());
+}
 
 int main() {
     const std::string arch = gemm_y::kArchName;
 
     // bf16: register NaiveGemm (the existing baseline kernel) and k0
     // (dummy custom kernel — verbatim naive body; workflow development).
-    {
-        using T = gemm_y::dtypes::bf16;
-        gemm_y::Profiler<T> prof;
-        prof.register_kernel<gemm_y::NaiveGemm<T>>();
-        prof.register_kernel<gemm_y::k0>();
-        const gemm_y::SweepResult result = prof.run_sweep(kSweepSizes);
-
-        const std::string out_csv = "results/bench_" + arch + "_bf16.csv";
-        const std::string out_meta = "results/bench_" + arch + "_bf16.meta";
-        std::printf("gemm_y: arch=%s dtype=bf16  out=%s\n", arch.c_str(), out_csv.c_str());
-        write_csv(result, out_csv);
-        std::vector<std::pair<std::string, std::string>> kernels;
-        //Register Test Kernels here
-        kernels.emplace_back(std::string(gemm_y::NaiveGemm<T>::name()),
-                             std::string(gemm_y::NaiveGemm<T>::description()));
-        kernels.emplace_back(std::string(gemm_y::k0::name()),
-                             std::string(gemm_y::k0::description()));
-
-
-        write_meta(out_meta, arch, "bf16", 20, 50, gemm_y::kRelErrTol<T>(), kernels);
-        std::printf("gemm_y: done. %zu rows written to %s\n", result.rows.size(), out_csv.c_str());
-    }
-
+    profile_bf16_kernels(arch);
 
 
 
     // fp16: register NaiveGemm (custom kernel for comparison vs cuBLAS).
-    {
-        using T = gemm_y::dtypes::fp16;
-        gemm_y::Profiler<T> prof;
-        prof.register_kernel<gemm_y::NaiveGemm<T>>();
-        const gemm_y::SweepResult result = prof.run_sweep(kSweepSizes);
+    // profile_fp16_kernels
 
-        const std::string out_csv = "results/bench_" + arch + "_fp16.csv";
-        const std::string out_meta = "results/bench_" + arch + "_fp16.meta";
-        std::printf("gemm_y: arch=%s dtype=fp16  out=%s\n", arch.c_str(), out_csv.c_str());
-        write_csv(result, out_csv);
-        std::vector<std::pair<std::string, std::string>> kernels;
-        kernels.emplace_back(std::string(gemm_y::NaiveGemm<T>::name()),
-                             std::string(gemm_y::NaiveGemm<T>::description()));
-        write_meta(out_meta, arch, "fp16", 20, 50, gemm_y::kRelErrTol<T>(), kernels);
-        std::printf("gemm_y: done. %zu rows written to %s\n", result.rows.size(), out_csv.c_str());
-    }
 
     // tfloat: register NaiveGemm (custom kernel for comparison vs cuBLAS).
     // tfloat = tf32 path (TC), not pedantic fp32 (CUDA cores).
-    {
-        using T = gemm_y::dtypes::tfloat;
-        gemm_y::Profiler<T> prof;
-        prof.register_kernel<gemm_y::NaiveGemm<T>>();
-        const gemm_y::SweepResult result = prof.run_sweep(kSweepSizes);
-
-        const std::string out_csv = "results/bench_" + arch + "_tf32.csv";
-        const std::string out_meta = "results/bench_" + arch + "_tf32.meta";
-        std::printf("gemm_y: arch=%s dtype=tf32  out=%s\n", arch.c_str(), out_csv.c_str());
-        write_csv(result, out_csv);
-        std::vector<std::pair<std::string, std::string>> kernels;
-        kernels.emplace_back(std::string(gemm_y::NaiveGemm<T>::name()),
-                             std::string(gemm_y::NaiveGemm<T>::description()));
-        write_meta(out_meta, arch, "tf32", 20, 50, gemm_y::kRelErrTol<T>(), kernels);
-        std::printf("gemm_y: done. %zu rows written to %s\n", result.rows.size(), out_csv.c_str());
-    }
-
+    // profile_tf32_kernels();
     return 0;
 }
