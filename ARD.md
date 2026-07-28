@@ -25,6 +25,9 @@
 15. `% perf vs cuBLAS` comparison metric
 16. Kernel file organization: shared `.cuh` + per-kernel `.cu`, `k0`/`k1`/… naming
 17. Phase 2D — per-N allocation + dead-code trim
+18. Reproducible benchmarks: clock locking (`bench.sh`)
+19. Statistical rigor: 95% CI for the median + p95 + std
+20. Visualization methodology: dashboard views
 
 ---
 
@@ -198,6 +201,40 @@ conversions — `MatrixView<T,S> -> MatrixView<const T,S>` would fail deduction
 at every call site. The const contract for the reference path is documented
 in `cublas_gemm.h` rather than enforced by the type system.
 
+#### Layering: device kernel (raw pointers) vs. harness adapter (`GemmArgs`)
+
+The device `__global__` function takes **raw pointers + dimension ints**:
+
+```cpp
+template <typename T>
+__global__ void naive_gemm_kernel(const T* A, const T* B, T* C,
+                                  int M, int N, int K,
+                                  int ldA, int ldB, int ldC);
+```
+
+where `C = A(M×K) × B(K×N) = C(M×N)`, ColMajor (element `(i,j)` at
+`ptr + i + j*ld`). For the square sweep `M == N == K`, but the signature is
+general. The device kernel has **no project includes** — pure CUDA, writable
+by a kernel author who knows nothing about `MatrixView`/`GemmArgs`/`Space`.
+
+The `operator()` functor is the **thin adapter** that unpacks `GemmArgs<T>`
+into the raw-pointer launch:
+
+```cpp
+template <typename T>
+void NaiveGemm<T>::operator()(GemmArgs<T> args, cudaStream_t stream) const {
+    detail::naive_gemm_kernel<T><<<grid, block, 0, stream>>>(
+        args.A.ptr, args.B.ptr, args.C.ptr,
+        args.C.rows, args.C.cols, args.A.cols,
+        args.A.ld, args.B.ld, args.C.ld);
+}
+```
+
+`MatrixView` is **not passed across the kernel boundary**. `GemmArgs<T>` is
+the harness ABI (what `Profiler` and `register_kernel<K>` see); raw pointers
++ dimension ints are the device kernel ABI. This decouples kernel authoring
+from the harness's view type.
+
 ### Alternatives considered
 - **Raw function pointers** (`void(*)(T*,T*,T*,int,int,int)`): rejected.
   - Loses metadata (`name`, `description`) needed for CSV/plotter labels.
@@ -236,8 +273,9 @@ class Profiler {
     };
     std::vector<Entry> kernels_;
     CublasHandle cublas_;  // owned
-    // ... pre-allocated 4096×4096 A, B, C_max buffers
-    void run_sweep(std::vector<int> sizes, std::string csv_path);
+    // Per-N buffers (A/B/C/C_ref, device + host) are allocated inside
+    // run_sweep's per-N loop — no pre-allocated max-size buffers (Phase 2D).
+    [[nodiscard]] SweepResult run_sweep(const std::vector<int>& sizes);
 };
 ```
 
@@ -992,3 +1030,212 @@ start/end pair.
 #
 # Phase history: git log --grep="Phase: 2D"
 ```
+
+---
+
+## 18. Reproducible benchmarks: clock locking (`bench.sh`)
+
+### Decision
+Reproducible benchmarks must be run via `sudo scripts/bench.sh`. The
+wrapper:
+1. Enables persistence mode (`nvidia-smi -i 0 -pm 1`) — keeps the GPU
+   driver loaded, avoiding the ~1s init latency on the first CUDA call.
+2. Queries the max graphics clock
+   (`nvidia-smi --query-gpu=clocks.max.gr --format=csv,noheader`) and
+   locks to it (`nvidia-smi -i 0 -lgc <max>,<max>`).
+3. Prints the pre-run temperature (thermal baseline).
+4. Drops privileges and runs `./build/gemm_y` as the original (non-root)
+   user (`sudo -u <SUDO_USER>`) so build artifacts aren't owned by root.
+5. Prints the post-run temperature (thermal delta sanity check).
+6. Resets clock lock (`-rgc`) and persistence mode (`-pm 0`) on exit. A
+   trap on `EXIT` / `INT` / `TERM` ensures reset even on Ctrl-C or crash.
+
+No fan control: consumer cards (RTX 5070) lock the auto-fan curve to the
+driver — manual fan control (`-fan-gpu`) returns "Not Supported". The
+attempt-and-warn path was dead weight locally; the auto-fan curve is the
+only path that ever runs. Datacenter cards (H100) support manual fan
+control but it is not orchestrated by this wrapper — the auto curve
+suffices for short sweeps.
+
+### Alternatives considered
+- **Record clock frequency in the `.meta` sidecar instead of locking**:
+  rejected. Recording the frequency documents the conditions but doesn't
+  make them reproducible — two runs at "max boost" can still differ by
+  1–5% due to thermal throttling and clock drift. Locking eliminates the
+  source of the noise rather than annotating it.
+- **Interleave cuBLAS and custom kernel measurements** (A, B, A, B, …):
+  rejected. This cancels slow clock drift across the two kernels but
+  doesn't help with fast thermal transients, complicates the harness
+  (the cuBLAS-once-per-N optimization in §4 would be lost), and still
+  leaves the absolute numbers unreproducible across runs. Clock locking
+  is the complete solution.
+- **No clock management (run `./build/gemm_y` directly)**: rejected for
+  reproducible runs. Acceptable for quick smoke tests where 1–5% noise
+  is tolerable, but not for the "did I beat cuBLAS" question at the 1%
+  level.
+
+### Rationale
+- **Locking to max frequency is not overclocking.** The max graphics
+  clock reported by `nvidia-smi` is within the GPU's validated boost
+  range; the GPU vendor guarantees it under the thermal envelope.
+  Thermal throttling still protects the hardware — if the temperature
+  exceeds the throttle threshold, the clock drops regardless of the lock.
+- **Pre/post temperature is a sanity check, not a guarantee.** A large
+  delta (e.g. >20 °C) suggests the auto-fan curve may be insufficient
+  and the run may have throttled; the user can re-run with better
+  cooling or on a datacenter card.
+- **The wrapper script is the source of truth, not the binary.** No
+  clock frequency is recorded in the `.meta` sidecar — the presence of a
+  `bench.sh` run (and the user's discipline in using it) is what makes a
+  run reproducible. The `.meta` records the sweep config, not the GPU
+  state.
+
+### Consequences
+- `./build/gemm_y` run directly (without `bench.sh`) produces
+  non-reproducible numbers — documented in `AGENTS.md` and the binary's
+  stdout header. Use only for smoke tests.
+- The wrapper requires `sudo` (nvidia-smi clock locking needs root).
+  CI (if ever added) would need passwordless sudo or a setuid wrapper —
+  out of scope for now.
+- H100 fan control is available but not orchestrated by this wrapper —
+  the auto curve suffices for short sweeps.
+
+---
+
+## 19. Statistical rigor: 95% CI for the median + p95 + std
+
+### Decision
+Each timed measurement (cuBLAS and custom kernel, per N) reports:
+- **min** — best-case (most robust vs OS noise).
+- **median** — the headline number (characterizes the typical case).
+- **std** — sample standard deviation (`n-1` denominator).
+- **p95** — 95th percentile (sort, index `ceil(0.95 * n) - 1`; with
+  `n=50`, that's index 47, the 48th sample).
+- **95% CI for the median** — `median ± 1.253 * std / sqrt(n)`. The
+  1.253 factor is the asymptotic ratio of the standard error of the
+  median to the standard error of the mean.
+
+The dashboard's Timing tab draws **per-point 95% CI error bars** on
+each trace (custom and cuBLAS). If the cuBLAS and custom error bars do
+not overlap vertically at a given N, the difference is statistically
+significant; if they overlap, the difference is inconclusive at the 95%
+level.
+
+### Rationale
+- **Why a CI and not just a point estimate.** A 1% "win" over cuBLAS is
+  indistinguishable from noise without a confidence interval. The CI
+  turns "the median is 1% lower" into "the median is 1% lower ± X%, so
+  the win is [significant / inconclusive] at 95%."
+- **Why the median, not the mean.** The mean is skewed by long-tail OS
+  preemption (a single 10 ms scheduling hiccup in 50 samples shifts the
+  mean noticeably). The median is robust to outliers. The CI formula
+  uses the median's asymptotic SE (`1.253 * σ / √n`), which is slightly
+  wider than the mean's SE (`σ / √n`) — the price of robustness.
+- **Why 95%.** Conventional. 90% would be too loose (false positives);
+  99% would need ~200+ samples for a useful CI width (the 1.253 factor
+  is asymptotic; small-n 99% CIs are unreliable). 95% with `n=50` gives
+  a CI width of ~`0.35σ` — tight enough to distinguish 1–5% differences
+  when `σ` is small (well-behaved kernels at large N).
+- **Why p95.** The median characterizes the typical case; p95
+  characterizes the tail. A kernel with a good median but a bad p95 is
+  "usually fast but occasionally hiccups" — useful to know for
+  latency-sensitive workloads. p99 would need 200+ samples to be stable;
+  deferred to Phase 2F (distribution analysis).
+- **Why error-bar overlap.** Two 95% CIs that don't overlap imply the
+  difference is significant at roughly the 95% level (technically
+  conservative — the Bonferroni-corrected level is stricter, but for
+  engineering purposes non-overlap is a clear signal). Overlap does not
+  prove the difference is zero — it means the data is inconclusive at
+  this sample size. More samples (Phase 2F) would tighten the CIs.
+
+### Caveats
+- The 1.253 factor is **asymptotic** (large n). For `n=50` it's a good
+  approximation; for `n<20` it underestimates the true SE. `kTimed=50`
+  is large enough.
+- The CI assumes the samples are **i.i.d.** (independent and
+  identically distributed). GPU clock locking (§18) makes this
+  approximately true; without it, thermal drift introduces a slow trend
+  that violates i.i.d. and inflates the apparent `σ`.
+- The CI is for the **median of the measured samples**, not for "the
+  true kernel runtime." Systematic effects (launch overhead in the
+  `cudaEvent` window, L2 cache state) are not captured by the CI — they
+  shift all samples together.
+
+### Consequences
+- The CSV schema gains 8 columns (`kernel_std_ns`, `kernel_p95_ns`,
+  `kernel_ci_low_ns`, `kernel_ci_high_ns` + `ref_*` equivalents). Old
+  CSVs (pre-2E) don't have them; `ingest.py` writes NULL and the DB
+  columns are nullable (migration is idempotent).
+- `h2d_ns` and `d2h_ns` are removed from the CSV (harness overhead is
+  not kernel performance; including them invites misinterpretation —
+  summing them into a "total" would penalize cuBLAS with overhead it
+  doesn't pay in production). Old DB rows keep their values (nullable).
+- The dashboard's hover shows `median`, `std`, `p95`, `95% CI [low,
+  high]` for both custom and cuBLAS, so the significance call is
+  visible at a glance.
+
+### Future: full distribution (Phase 2F)
+The 95% CI + p95 is a summary. Phase 2F (deferred) stores all 50 raw
+samples in a `samples` table and adds box plots / violin plots for
+deep-dive distribution analysis (bimodal behavior, outlier
+attribution).
+
+---
+
+## 20. Visualization methodology: dashboard views
+
+### Decision
+Dashboard views built on the 2E.3 CI error bars and the 2G.5
+raw-sample storage. Each answers a distinct question about kernel
+performance.
+
+#### (f) Statistical significance overlay (Timing tab)
+Each custom point on the Timing tab gets a ring around its marker:
+- **Green** — custom is **significantly faster** than cuBLAS (custom CI
+  entirely below cuBLAS CI — no vertical overlap).
+- **Red** — custom is **significantly slower** (custom CI entirely above).
+- **Gray** — **inconclusive** (CIs overlap).
+
+Significance is computed per point from `kernel_ci_low_ns`/
+`kernel_ci_high_ns` and `ref_kernel_ci_low_ns`/`ref_kernel_ci_high_ns`.
+Non-overlap of two 95% CIs implies the difference is significant at
+roughly the 95% level (conservative — technically the Bonferroni-
+corrected level is stricter, but for engineering purposes non-overlap
+is a clear signal). Overlap does not prove the difference is zero — it
+means the data is inconclusive at this sample size.
+
+#### (b) Speedup tab
+Plots `ref_median / kernel_median` (speedup ratio) vs N. `>1` = custom
+faster than cuBLAS. Parity line at 1.0. Per-point CI via first-order
+Gaussian propagation: the CI half-width for the ratio is
+`ratio * sqrt((σ_kernel/median_kernel)^2 + (σ_ref/median_ref)^2)`.
+cuBLAS trace excluded (ratio = 1 by definition). Log-y default (ratios
+span 0.1–10×).
+
+#### (e) Cross-run diff view
+Sidebar gets a second run selector (Diff run B). Plots `median_A / median_B`
+vs N, one line per kernel name common to both runs. `>1` = run A is slower;
+`<1` = run A is faster. Parity line at 1.0. Per-point CI via propagation
+(same formula as the Speedup tab). Directly answers "did k1 beat k0". If a
+kernel exists in only one run, it's skipped.
+
+### Rationale
+- Each view answers a different question: "is the difference
+  significant?" (significance overlay), "how much faster?" (Speedup),
+  "did this run beat the last?" (Diff). No single view subsumes another.
+- **Why first-order Gaussian propagation for ratio CIs.** The exact CI
+  for a ratio of medians has no closed form; the first-order approximation
+  `ratio * sqrt((σ_a/m_a)^2 + (σ_b/m_b)^2)` is standard and sufficient
+  for engineering purposes when the relative SEs are small (<10%).
+
+### Caveats
+- The Diff tab's run A is the first selected run in the "Runs" multi-
+  select; run B is the single-select "Diff run B" dropdown. If the Runs
+  multi-select is empty, the Diff tab shows a message.
+
+### Removed views
+The Distribution (box + violin), TFLOPS, and Roofline tabs were implemented
+and removed after manual review. The raw-sample `samples` table and
+`insert_sample`/`fetch_samples` infrastructure remain (storage is cheap
+and may support future views), but `fetch_samples_for_n` was deleted with
+the Distribution tab.

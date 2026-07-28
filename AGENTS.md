@@ -192,14 +192,23 @@ Do not load `ARD.md` in full unless reviewing a specific decision.
   kernels are named `k0`, `k1`, … during development (counter = progress
   ruler); switch to descriptive names (`Tiled128`, `Tiled128V2`, …) when
   finalized. `NaiveGemm<T>` is the permanent sanity baseline, not `k0`.
+- **Device kernel ABI** (see ARD §3): the device `__global__` function
+  takes raw pointers + dimension ints `(const T* A, const T* B, T* C,
+  int M, int N, int K, int ldA, int ldB, int ldC)` — pure CUDA, no
+  project includes. The `operator()` functor is the thin adapter that
+  unpacks `GemmArgs<T>` into the raw-pointer launch. `MatrixView` is not
+  passed across the kernel boundary.
 - **Warp-level primitives**: prefer `__shfl_sync`, `wmma`/`mma` over
   shared-memory reductions where the arch supports it natively.
-- **Kernel ABI (`GemmArgs<T>`)**: `A`/`B` are `MatrixView<const T, Device>`
-  (read-only inputs), `C` is `MatrixView<T, Device>` (mutable output). Relies
-  on `MatrixView`'s implicit converting ctor (`MatrixView<T,S> ->
-  `MatrixView<const T,S>`) — zero call-site churn. `cublas_gemm` is the
-  exception: it takes writable views for A/B because C++ template argument
-  deduction does not consider implicit conversions (see ARD §3).
+- **Kernel ABI (`GemmArgs<T>`)**: `GemmArgs` is the **harness ABI** —
+  `A`/`B` are `MatrixView<const T, Device>` (read-only inputs), `C` is
+  `MatrixView<T, Device>` (mutable output). Relies on `MatrixView`'s
+  implicit converting ctor (`MatrixView<T,S> -> `MatrixView<const T,S>`) —
+  zero call-site churn. The **device kernel ABI** is raw pointers +
+  dimension ints (see "Device kernel ABI" above); `operator()` is the
+  adapter between the two. `cublas_gemm` is the exception: it takes
+  writable views for A/B because C++ template argument deduction does
+  not consider implicit conversions (see ARD §3).
 - **`MatrixView` dual-use**: (1) host-side view (`operator()` for element
   access, converting ctor for const-correctness), (2) kernel-side POD
   descriptor (only `ptr`/`rows`/`cols`/`ld` read directly). Host methods
@@ -231,12 +240,29 @@ Do not load `ARD.md` in full unless reviewing a specific decision.
 
 ## Benchmarking Protocol
 
+### Reproducible runs (clock locking)
+- **Reproducible benchmarks must be run via `sudo scripts/bench.sh`**.
+  The wrapper locks the GPU graphics clock to max frequency, runs
+  `./build/gemm_y` as the original (non-root) user, then resets
+  clock/persistence on exit (trap on EXIT/INT/TERM). See ARD §18 for the
+  full rationale.
+- Running `./build/gemm_y` directly (without clock locking) produces
+  **non-reproducible** numbers — GPU clock drift and thermal throttling
+  introduce 1–5% noise that swamps small kernel-vs-cuBLAS differences.
+- **Thermal safety**: locking to max frequency is **not** overclocking
+  (it's within the GPU's validated boost range); thermal throttling still
+  protects the hardware; the wrapper prints pre/post temperature as a
+  sanity check. The auto-fan curve (the only path on consumer cards like
+  RTX 5070, where manual fan control is unsupported) is usually
+  sufficient for short sweeps.
+
 ### Matrix Size Sweep
 - Square matrices only: `N ∈ {32, 64, 96, 128, 192, 256, 384, 512, 768,
   1024, 1536, 2048, 3072, 4096}`.
 - Powers of 2 plus midpoints — captures both tiling-aligned and
   misaligned cases.
 - For each `N`: benchmark both the custom kernel and cuBLAS reference.
+
 
 ### Output artifacts
 - `results/bench_<arch>_<dtype>.csv` — one row per (N, kernel). Failed

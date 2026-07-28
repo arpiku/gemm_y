@@ -7,6 +7,13 @@
 # failed kernels (rel_err > tol) are skipped at the Profiler level before
 # CSV write, so they never reach ingest. There is no `pass` column.
 # `is_cublas` is derived in Python at query time (kernel_name == 'cublas').
+#
+# Schema evolution:
+#   - Phase 2E: h2d_ns/d2h_ns are nullable (old runs keep them; new runs
+#     write NULL — harness overhead is not kernel performance). Added
+#     kernel_std_ns, kernel_p95_ns, kernel_ci_low_ns, kernel_ci_high_ns
+#     and ref_* equivalents. _migrate() adds columns idempotently for
+#     pre-existing DBs.
 
 from __future__ import annotations
 
@@ -50,7 +57,31 @@ CREATE TABLE IF NOT EXISTS measurements (
 CREATE INDEX IF NOT EXISTS idx_meas_run    ON measurements(run_id);
 CREATE INDEX IF NOT EXISTS idx_meas_kernel ON measurements(kernel_name);
 CREATE INDEX IF NOT EXISTS idx_runs_arch_dtype ON runs(arch, dtype);
+CREATE TABLE IF NOT EXISTS samples (
+    run_id        INTEGER NOT NULL,
+    n             INTEGER NOT NULL,
+    kernel_name   TEXT NOT NULL,
+    sample_index  INTEGER NOT NULL,
+    ns            REAL NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES runs(id)
+);
+CREATE INDEX IF NOT EXISTS idx_samples_run_n_kernel
+    ON samples(run_id, n, kernel_name);
 """
+
+# Columns added in Phase 2E (statistical rigor). Nullable so old runs
+# (which only have min/median) still query cleanly. _migrate() adds them
+# idempotently to pre-existing DBs.
+_MIGRATION_COLUMNS = [
+    "kernel_std_ns",
+    "kernel_p95_ns",
+    "kernel_ci_low_ns",
+    "kernel_ci_high_ns",
+    "ref_kernel_std_ns",
+    "ref_kernel_p95_ns",
+    "ref_kernel_ci_low_ns",
+    "ref_kernel_ci_high_ns",
+]
 
 
 def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
@@ -59,7 +90,23 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Idempotently add Phase 2E stat columns to a pre-existing DB.
+
+    CREATE TABLE IF NOT EXISTS won't add columns to an existing table, so
+    we ALTER TABLE for each new column, ignoring 'duplicate column name'
+    errors (the column already exists from a prior migration).
+    """
+    for col in _MIGRATION_COLUMNS:
+        try:
+            conn.execute(f"ALTER TABLE measurements ADD COLUMN {col} REAL")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+    conn.commit()
 
 
 @contextmanager
@@ -74,6 +121,7 @@ def cursor(conn: sqlite3.Connection) -> Iterator[sqlite3.Cursor]:
 def init_schema(conn: sqlite3.Connection) -> None:
     """Idempotent schema creation."""
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.commit()
 
 
@@ -123,8 +171,16 @@ def insert_measurement(
     kernel_min_ns: Optional[float],
     kernel_median_ns: Optional[float],
     d2h_ns: Optional[float],
+    kernel_std_ns: Optional[float],
+    kernel_p95_ns: Optional[float],
+    kernel_ci_low_ns: Optional[float],
+    kernel_ci_high_ns: Optional[float],
     ref_kernel_min_ns: Optional[float],
     ref_kernel_median_ns: Optional[float],
+    ref_kernel_std_ns: Optional[float],
+    ref_kernel_p95_ns: Optional[float],
+    ref_kernel_ci_low_ns: Optional[float],
+    ref_kernel_ci_high_ns: Optional[float],
     max_abs_err: Optional[float],
     max_rel_err: Optional[float],
 ) -> None:
@@ -134,14 +190,22 @@ def insert_measurement(
             INSERT INTO measurements (
                 run_id, n, kernel_name, kernel_desc,
                 h2d_ns, kernel_min_ns, kernel_median_ns, d2h_ns,
+                kernel_std_ns, kernel_p95_ns,
+                kernel_ci_low_ns, kernel_ci_high_ns,
                 ref_kernel_min_ns, ref_kernel_median_ns,
+                ref_kernel_std_ns, ref_kernel_p95_ns,
+                ref_kernel_ci_low_ns, ref_kernel_ci_high_ns,
                 max_abs_err, max_rel_err
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id, n, kernel_name, kernel_desc,
                 h2d_ns, kernel_min_ns, kernel_median_ns, d2h_ns,
+                kernel_std_ns, kernel_p95_ns,
+                kernel_ci_low_ns, kernel_ci_high_ns,
                 ref_kernel_min_ns, ref_kernel_median_ns,
+                ref_kernel_std_ns, ref_kernel_p95_ns,
+                ref_kernel_ci_low_ns, ref_kernel_ci_high_ns,
                 max_abs_err, max_rel_err,
             ),
         )
@@ -185,6 +249,21 @@ def list_runs(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         return [dict(row) for row in cur.fetchall()]
 
 
+# Columns selected for measurement joins. Kept in one place so the two
+# query functions (fetch_measurements, measurements_with_perf_pct) stay
+# in sync. h2d_ns/d2h_ns are nullable (Phase 2E: new runs write NULL).
+_MEASUREMENT_COLUMNS = """
+    m.run_id, m.n, m.kernel_name, m.kernel_desc,
+    m.h2d_ns, m.kernel_min_ns, m.kernel_median_ns, m.d2h_ns,
+    m.kernel_std_ns, m.kernel_p95_ns,
+    m.kernel_ci_low_ns, m.kernel_ci_high_ns,
+    m.ref_kernel_min_ns, m.ref_kernel_median_ns,
+    m.ref_kernel_std_ns, m.ref_kernel_p95_ns,
+    m.ref_kernel_ci_low_ns, m.ref_kernel_ci_high_ns,
+    m.max_abs_err, m.max_rel_err
+"""
+
+
 def fetch_measurements(
     conn: sqlite3.Connection,
     *,
@@ -195,11 +274,8 @@ def fetch_measurements(
 ) -> list[dict[str, Any]]:
     """Filtered measurement join. `kernel_classes` is a subset of
     {'cublas', 'custom'}; derived from kernel_name at query time."""
-    query = """
-        SELECT m.run_id, m.n, m.kernel_name, m.kernel_desc,
-               m.h2d_ns, m.kernel_min_ns, m.kernel_median_ns, m.d2h_ns,
-               m.ref_kernel_min_ns, m.ref_kernel_median_ns,
-               m.max_abs_err, m.max_rel_err,
+    query = f"""
+        SELECT {_MEASUREMENT_COLUMNS},
                r.ingested_at, r.git_sha, r.label, r.arch, r.dtype,
                r.tol, r.warmup_iters, r.timed_iters,
                CASE
@@ -271,11 +347,8 @@ def measurements_with_perf_pct(
     """
     with cursor(conn) as cur:
         cur.execute(
-            """
-            SELECT m.run_id, m.n, m.kernel_name, m.kernel_desc,
-                   m.h2d_ns, m.kernel_min_ns, m.kernel_median_ns, m.d2h_ns,
-                   m.ref_kernel_min_ns, m.ref_kernel_median_ns,
-                   m.max_abs_err, m.max_rel_err,
+            f"""
+            SELECT {_MEASUREMENT_COLUMNS},
                    r.ingested_at, r.git_sha, r.label, r.arch, r.dtype,
                    r.tol, r.warmup_iters, r.timed_iters,
                    CASE
@@ -333,3 +406,43 @@ def best_custom_perf_pct_at_n(
             return None
         val = row[0]
         return float(val) if val is not None else None
+
+
+def insert_sample(
+    conn: sqlite3.Connection,
+    *,
+    run_id: int,
+    n: int,
+    kernel_name: str,
+    sample_index: int,
+    ns: float,
+) -> None:
+    """Insert one raw timing sample into the `samples` table (ARD §20)."""
+    with cursor(conn) as cur:
+        cur.execute(
+            """
+            INSERT INTO samples (run_id, n, kernel_name, sample_index, ns)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (run_id, n, kernel_name, sample_index, ns),
+        )
+    conn.commit()
+
+
+def fetch_samples(
+    conn: sqlite3.Connection,
+    *,
+    run_id: int,
+) -> list[dict[str, Any]]:
+    """All raw samples for a run, ordered by (n, kernel_name, sample_index)."""
+    with cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT run_id, n, kernel_name, sample_index, ns
+              FROM samples
+             WHERE run_id = ?
+             ORDER BY n, kernel_name, sample_index
+            """,
+            (run_id,),
+        )
+        return [dict(row) for row in cur.fetchall()]

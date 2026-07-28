@@ -7,205 +7,246 @@
 
 ---
 
-## Phase 2D — Bench-runner refactor: per-N allocation + dead-code trim
+## Phase 2G — Fan removal, kernel/harness decoupling, visualization
 
-Goal: replace the pre-allocated 4096×4096 + `block()` slicing strategy with
-per-`N` allocation so `ld == N` for every kernel launch. Trim dead surface
-area (`Tracer.h`, `Copy.h`, `Layout`, `block()`, `is_contiguous()`,
-strided-copy path, RowMajor branches, strided microbench). No new features;
-correctness + hygiene only.
+Goal: three independent tracks. (1) Remove the dead fan-control path from
+`bench.sh` (not supported on RTX 5070). (2) Decouple device kernels from
+the harness — `__global__` functions take raw pointers + dimension ints,
+not `MatrixView`; the `operator()` functor is the thin adapter that unpacks
+`GemmArgs`. (3) Build out the dashboard's visualization surface: six new
+views (distribution, speedup, TFLOPS, roofline, cross-run diff,
+significance overlay). Also: clean up `Stats.h` dead code, fix the
+`server.py` color-comment mismatch.
 
-**Context:** the pre-alloc strategy (ARD §5, superseded) forced every kernel
-to run on `ld=4096` regardless of `N`. A kernel author writing a 128×128
-tiled TC kernel for `N=128` cannot exercise the `ld == N` fast path; the
-4096 stride pollutes L2/TLB and makes benchmark numbers unrepresentative of
-a real `N=128` problem. cuBLAS itself runs on the same strided layout, so
-the comparison is apples-to-apples only because both sides are equally
-penalized. Additionally, `h2d_ns` was a single global number stamped into
-every CSV row regardless of `N` — semantically wrong.
+### Step 1 — Remove fan-speed control from `bench.sh`
 
-### Step 1 — Delete `Tracer.h`, inline its one use
+**Context:** `-fan-gpu` returns "Not Supported" on RTX 5070 (consumer cards
+lock the auto-fan curve to the driver). The attempt-and-warn path is dead
+weight locally; the auto-fan curve is the only path that ever runs. Remove
+it entirely rather than carrying a fallback that never fires.
 
-- [ ] **2D.1** Delete `src/Tracer.h`.
-- [ ] **2D.2** `src/bench/Profiler.cu`: drop `#include "Tracer.h"`, drop the
-  `tracer::Timer<> sweep_timer` + two `mark()`s + the wall-time `printf`
-  block. Replace with a 3-line `std::chrono::steady_clock` start/end +
-  `printf` for sweep wall time (host orchestration context only — not
-  kernel timing; `CudaTimer` remains the only device timer).
+- [ ] **2G.1.1** `scripts/bench.sh`: remove the `-fan-gpu 100` setup block
+  and the `-fan-gpu 0` reset line in `reset_state`. Remove the
+  fan-control caveat comment block at the top of the file. Keep:
+  persistence mode (`-pm 1`), clock lock (`-lgc <max>,<max>`), drop-privs
+  (`sudo -u`), pre/post temperature print, trap on `EXIT`/`INT`/`TERM`.
+  The reset trap keeps `-rgc` (clock reset) and `-pm 0` (persistence
+  reset); drop the fan reset line.
+- [ ] **2G.1.2** `AGENTS.md` → "Reproducible runs (clock locking + fan
+  control)": rename section to "Reproducible runs (clock locking)". Drop
+  the "spins fans to 100% (if supported)" clause from the first bullet.
+  Delete the "Fan-control caveat" bullet entirely. Keep the thermal-safety
+  bullet (still relevant — auto-fan curve + clock lock + pre/post temp).
+- [ ] **2G.1.3** `ARD.md` §18: rename to "Reproducible benchmarks: clock
+  locking (`bench.sh`)". Update the TOC entry. In the Decision: drop
+  step 2 (fan spin), drop the fan reset from step 7. In Rationale: delete
+  the "Fan control is best-effort" bullet. In Consequences: delete the
+  "Cross-arch (H100) may need admin cooperation for fan control" bullet
+  (replace with a note that H100 fan control is available but not
+  orchestrated by this wrapper — the auto curve suffices). Keep the
+  thermal-safety rationale.
+- [ ] **2G.1.4** `TODO.md` 2E.2.1: the step is already done in practice;
+  this is a documentation sync. No action needed in TODO.md itself (the
+  2E section is forward-looking only if incomplete — verify 2E is fully
+  checked off; if so, leave it).
 
-### Step 2 — Refactor `Profiler::run_sweep` to allocate per-N
+### Step 2 — Decouple device kernels from the harness
 
-- [ ] **2D.3** `src/bench/Profiler.cu`: remove `constexpr int kMaxN = 4096;`
-  and the `if (N > kMaxN) skip` guard.
-- [ ] **2D.4** Move all 8 `Matrix<...>::alloc(...)` calls **inside** the
-  `for (int N : sizes)` loop, sized `N×N`. Buffers are RAII — constructed
-  and destroyed per iteration, no manual `cudaFree`.
-- [ ] **2D.5** `bench::fill_sequential<T>(hA.view(), hB.view())` per `N`
-  (filling an `N×N` host buffer directly — no strided source).
-- [ ] **2D.6** H2D A+B per `N`, timed per `N` via `CudaTimer`, reported per
-  row. The `h2d_ns` column now means "H2D cost for this `N`" — semantically
-  correct (was: global 4096² value repeated per row).
-- [ ] **2D.7** Drop all `.block(0,0,N,N)` calls — views are the full buffer;
-  `ld == N` (ColMajor default in `Matrix::alloc`).
-- [ ] **2D.8** D2H C and C_ref per `N` (already per-`N` in the inner loop;
-  drop the `.block()`).
-- [ ] **2D.9** Debug OOB snapshot → single contiguous `cudaMemcpy` of the
-  `N×N` `C_ref` buffer + `memcmp` (replaces the element-loop snapshot).
-- [ ] **2D.10** Update the `[Profiler]` startup `printf` (drop `kMaxN`
-  reference; `h2d` is now per-`N`, so the startup line no longer reports a
-  single H2D number — drop it from the startup print, it's per-row in the
-  CSV).
+**Context:** device kernels currently take `MatrixView<const T, Device>`
+by value. This couples kernel authoring to the harness's view type — a
+kernel author must include `MatrixView.h`, `Space.h`, and understand the
+POD-descriptor contract. A kernel should be writable as pure CUDA:
+`__global__ void k(T* A, T* B, T* C, int M, int N, int K, int ldA, int ldB,
+int ldC)`. The harness's `operator()` functor (the `KernelTraits`-satisfying
+adapter) unpacks `GemmArgs<T>` into the raw-pointer call.
 
-### Step 3 — Delete `Copy.h`, inline `cudaMemcpy`
+**Layering:**
+- **Device kernel** (`__global__`): raw pointers + dimension ints. No
+  project includes. Pure CUDA.
+- **Host functor** (`operator()`): takes `GemmArgs<T>` + `cudaStream_t`
+  (the harness ABI). Unpacks `args.A.ptr`, `args.A.ld`, etc. into the
+  raw-pointer kernel launch.
+- **`GemmArgs` / `MatrixView`**: unchanged. Still the harness ABI.
 
-- [ ] **2D.11** Delete `src/Copy.h` entirely.
-- [ ] **2D.12** `src/bench/Profiler.cu`: replace `copy_h2d(dst, src)` /
-  `copy_d2h(dst, src)` calls with direct `CUDA_CHECK(cudaMemcpy(...))` using
-  `cudaMemcpyHostToDevice` / `cudaMemcpyDeviceToHost`. Buffers are
-  contiguous (`ld == N`), so `cudaMemcpy` (not `cudaMemcpy2D`) is correct.
-  Direction is explicit at the call site — no `copy_kind_v` dispatch needed.
+**Dimension convention:** `(T* A, T* B, T* C, int M, int N, int K, int ldA,
+int ldB, int ldC)` where `C = A(M×K) × B(K×N) = C(M×N)`. For the square
+sweep, `M == N == K`, but the kernel signature is general.
 
-### Step 4 — Trim `MatrixView.h`
+- [ ] **2G.2.1** `src/sm90/gemm_naive.cu`, `src/sm120/gemm_naive.cu`:
+  change `detail::naive_gemm_kernel<T>` signature from
+  `(MatrixView<const T, Device> A, MatrixView<const T, Device> B,
+  MatrixView<T, Device> C)` to
+  `(const T* A, const T* B, T* C, int M, int N, int K, int ldA, int ldB,
+  int ldC)`. Update the body: `A.ptr[i + k*A.ld]` → `A[i + k*ldA]`, etc.
+  Bounds check uses `M`/`N` (C rows/cols). Inner loop uses `K` (A cols).
+  Update `NaiveGemm<T>::operator()` to unpack:
+  `detail::naive_gemm_kernel<T><<<grid, block, 0, stream>>>(
+      args.A.ptr, args.B.ptr, args.C.ptr,
+      args.C.rows, args.C.cols, args.A.cols,
+      args.A.ld, args.B.ld, args.C.ld)`.
+  Drop `#include "MatrixView.h"` from these `.cu` files (no longer needed
+  in the kernel body; `GemmArgs.h` pulls it in transitively for the host
+  side).
+- [ ] **2G.2.2** `src/sm90/gemm_bf16_k0.cu`, `src/sm120/gemm_bf16_k0.cu`:
+  same transformation. `k0_gemm_kernel` takes
+  `(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
+  int M, int N, int K, int ldA, int ldB, int ldC)`. `k0::operator()`
+  unpacks `GemmArgs`. Drop `#include "MatrixView.h"`.
+- [ ] **2G.2.3** Verify no other kernel `.cu` files exist in `src/sm90/`
+  and `src/sm120/` (only `gemm_naive.cu` and `gemm_bf16_k0.cu` per arch).
+  If `gemm_bf16_k1.cu` or similar exist, apply the same transformation.
+- [ ] **2G.2.4** `tests/test.cu`: verify no test calls the device kernel
+  directly (they're in anonymous namespaces — unlikely). Tests call
+  `NaiveGemm<T>::operator()` via the Profiler, which is unchanged at the
+  ABI level. If any test constructs `MatrixView` for a kernel call, update
+  to the new signature. Run `ctest` to confirm.
+- [ ] **2G.2.5** `ARD.md` §3 (Kernel abstraction): add a sub-section
+  documenting the layering — device `__global__` functions take raw
+  pointers + dimension ints `(M, N, K, ldA, ldB, ldC)`; the `operator()`
+  functor is the harness adapter that unpacks `GemmArgs<T>`. This is the
+  durable contract for future kernel authors. Note that `MatrixView` is
+  not passed across the kernel boundary.
+- [ ] **2G.2.6** `AGENTS.md` → "Kernel file organization": add a bullet
+  that the device `__global__` function takes raw pointers + dimension
+  ints (no `MatrixView`), and the `operator()` functor is the thin adapter.
+  Update the "Kernel ABI (`GemmArgs<T>`)" bullet to clarify the layering:
+  `GemmArgs` is the harness ABI; the device kernel ABI is raw pointers.
 
-- [ ] **2D.13** Delete `block()` (no call sites after Step 2).
-- [ ] **2D.14** Delete `is_contiguous()` (no call sites after Step 3).
-- [ ] **2D.15** Delete the `Layout` field and all `Layout::RowMajor`
-  branches in `operator()` (dead — ColMajor-only is the stated invariant
-  everywhere; `Layout.h` is being deleted in Step 6).
-- [ ] **2D.16** Rewrite the header comment: remove the "pre-allocate
-  4096×4096" paragraph and the `block()`/`is_contiguous()` documentation.
-  The dual-use contract (host utility + kernel POD descriptor) still holds
-  — just without `block`/`is_contiguous`. `operator()` is host-side
-  element access (used by `Accuracy.h::compare` and tests); the converting
-  ctor stays (const-correctness for `GemmArgs`).
+### Step 3 — Clean up `Stats.h` dead code
 
-### Step 5 — Trim `Matrix.h`
+- [ ] **2G.3.1** `src/bench/Stats.h`: remove the dead `mean_ns` placeholder
+  (lines ~46–47: `const double mean_ns = ...; // placeholder`) and the
+  `(void)mean_ns;` line (~58). The real mean is computed at line ~51
+  (`const double mean = acc / n`). The placeholder is leftover from
+  refactoring — confusing dead code.
 
-- [ ] **2D.17** `Matrix::alloc`: drop the `Layout` parameter and the
-  `RowMajor` branch. `ld = rows` unconditionally (ColMajor is the only
-  layout). Drop the `layout` field and the `layout()` accessor.
-- [ ] **2D.18** Update the `Matrix` ctor signature (drop `Layout` arg) and
-  the `view()` methods (drop `layout_` from the constructed `MatrixView`).
+### Step 4 — Fix `server.py` color-comment mismatch
 
-### Step 6 — Delete `Layout.h`
+- [ ] **2G.4.1** `scripts/server.py` (lines ~48–52): the comments say
+  "light gray plot area" for `PLOT_BG_COLOR = "#ffffff"` and "white
+  margin / page" for `PAPER_BG_COLOR = "#f0f0f0"` — both wrong (inverted).
+  Fix the comments to match the actual values: `#ffffff` = white plot
+  area, `#f0f0f0` = light gray page/margin. The values themselves are the
+  user's manual choice — keep them. Remove the commented-out
+  `#PLOT_BG_COLOR = "#f0f0f0"` / `#PAPER_BG_COLOR = "#ffffff"` lines
+  (dead alternates).
 
-- [ ] **2D.19** Delete `src/Layout.h`. After Steps 4 and 5, no code
-  references `Layout` or `Layout::ColMajor`.
+### Step 5 — Visualization: raw-sample storage (foundation for 2G.6)
 
-### Step 7 — Update `tests/test.cu`
+**Context:** the distribution tab (2G.6.a) and the cross-run diff view
+(2G.6.e) need access to the raw 50 timed samples per (run, N, kernel),
+not just the summary stats. Currently only summary stats (min/median/std/
+p95/CI) are stored. Add a `samples` table.
 
-- [ ] **2D.20** Delete `test_matrixview_block` (exercises `block()`).
-- [ ] **2D.21** Delete `test_matrixview_is_contiguous` (exercises
-  `is_contiguous()`).
-- [ ] **2D.22** Delete `test_copy_roundtrip_submatrix` (exercises strided
-  `cudaMemcpy2D` path via `Copy.h`).
-- [ ] **2D.23** Delete `test_cublas_gemm_bf16_strided` (exercises `block()`
-  + strided cuBLAS).
-- [ ] **2D.24** Update `test_copy_roundtrip_full`, `test_matrix_view_from_matrix`,
-  `test_matrixview_const_conversion`, and any other test constructing
-  `MatrixView`/`Matrix` to drop the `Layout` argument.
-- [ ] **2D.25** Update `main()`'s test-call list to match the deletions.
+- [ ] **2G.5.1** `scripts/db.py`: add a `samples` table schema:
+  `CREATE TABLE IF NOT EXISTS samples (
+     run_id INTEGER NOT NULL,
+     n INTEGER NOT NULL,
+     kernel_name TEXT NOT NULL,
+     sample_index INTEGER NOT NULL,
+     ns REAL NOT NULL,
+     FOREIGN KEY (run_id) REFERENCES runs(id)
+  )`. Add an index on `(run_id, n, kernel_name)`. Add `insert_sample()`
+  and `fetch_samples()` query functions. `_migrate()` should create the
+  table idempotently (CREATE TABLE IF NOT EXISTS handles this).
+- [ ] **2G.5.2** `src/bench/Profiler.cu`: the 50 raw `ms` samples per
+  (N, kernel) are currently discarded after `summarize_ns`. They need to
+  reach the CSV so `ingest.py` can store them. Add a `std::vector<double>
+  raw_samples_ns` field to `SweepRow` (the 50 samples in ns, serialized).
+  Populate it from `ms` (convert each to ns). For cuBLAS rows, populate
+  from the cuBLAS `ms`. **CSV format decision:** add a single
+  `kernel_samples_ns` column containing the 50 values as a
+  semicolon-separated string (e.g. `1234.5;1235.1;...`). Avoids 50
+  columns. `ingest.py` splits on `;` and inserts one row per sample into
+  the `samples` table. Old CSVs (pre-2G) don't have this column —
+  `ingest.py` handles its absence (no samples stored for old runs).
+- [ ] **2G.5.3** `src/main.cpp`: add `kernel_samples_ns` to the CSV header
+  and `append_row` calls. `CsvWriter` must handle a string field containing
+  semicolons (verify it doesn't split on `;` — CSV uses commas; semicolons
+  are safe inside a field).
+- [ ] **2G.5.4** `scripts/ingest.py`: parse `kernel_samples_ns` (split on
+  `;`), insert each sample via `db.insert_sample()`. Handle missing column
+  (old CSVs) — write no samples. Handle empty string — write no samples.
+- [ ] **2G.5.5** `src/bench/Profiler.h`: add `std::string
+  kernel_samples_ns` field to `SweepRow` (serialized semicolon-separated).
+  Document the format in a comment.
 
-### Step 8 — Delete strided microbench variant
+### Step 6 — Visualization: dashboard views
 
-- [ ] **2D.26** `src/bench/microbench/memcpy_microbench.cu`: delete
-  `bench_h2d_strided_2d` and `bench_d2h_strided_2d` (the strided
-  `cudaMemcpy2D` variants — no longer representative of the bench runner,
-  which now uses contiguous `cudaMemcpy` exclusively). Delete the calls in
-  `run_memcpy_microbench_main`. Keep the contiguous + async variants.
+**Context:** three views, building on the 2E.3 CI error bars and the
+2G.5 raw-sample storage. (Distribution / TFLOPS / Roofline tabs were
+implemented and removed after manual review — see ARD §20 "Removed
+views".)
 
-### Step 9 — Update `cublas_gemm.h`
+#### (f) Statistical significance overlay on the Timing tab
 
-- [ ] **2D.27** `src/cublas/cublas_gemm.h`: drop the `Layout::ColMajor`
-  check (the `layout` field is gone). Drop the `GEMM_Y_ASSERT` on layout
-  (no longer applicable — ColMajor is the only layout, enforced by
-  `Matrix::alloc` setting `ld = rows`).
+- [x] **2G.6.1** `scripts/server.py` `_timing_figure`: significance
+  marker on each custom point. A point is **significant** (custom ≠
+  cuBLAS) if the custom CI and cuBLAS CI **do not overlap** vertically at
+  that N. **Inconclusive** if they overlap. Visual: significant points
+  get a green ring (faster) or red ring (slower) around the marker;
+  inconclusive points get a gray ring. Compute significance per point
+  from `kernel_ci_low_ns`/`kernel_ci_high_ns` and `ref_kernel_ci_low_ns`/
+  `ref_kernel_ci_high_ns`. Skip for old runs missing CI data.
 
-### Step 10 — Update `gemm_naive.cu` (both arches) + `gemm_bf16_k0.cu`
+#### (b) Speedup tab
 
-- [ ] **2D.28** `src/sm90/gemm_naive.cu`, `src/sm120/gemm_naive.cu`,
-  `src/sm120/gemm_bf16_k0.cu`: drop the `GEMM_Y_ASSERT` on
-  `args.A.layout == Layout::ColMajor` (the `layout` field is gone). The
-  ColMajor invariant is now structural (`Matrix::alloc` sets `ld = rows`),
-  not a runtime check.
+- [x] **2G.6.5** `scripts/server.py`: "Speedup" tab. Plots
+  `ref_median / kernel_median` (speedup ratio) vs N. `>1` = custom faster
+  than cuBLAS. Parity line at 1.0. Per-point CI error bars via error
+  propagation: the CI half-width for the ratio is
+  `ratio * sqrt((σ_kernel/median_kernel)^2 + (σ_ref/median_ref)^2)`
+  (first-order Gaussian propagation). Hover shows ratio, custom median,
+  cuBLAS median, propagated CI. cuBLAS trace excluded (ratio = 1 by
+  definition). Log-y is the default (ratios span 0.1–10×).
 
-### Step 11 — Update `AGENTS.md`
+#### (e) Cross-run diff view
 
-- [ ] **2D.29** Repository Layout: drop `Tracer.h`, `Copy.h`, `Layout.h`
-  lines; update `Matrix.h`/`MatrixView.h` descriptions (no more
-  "pre-allocate 4096×4096", no more `block()`/`is_contiguous()`).
-- [ ] **2D.30** Coding Conventions → C++ / CUDA Style: drop the Tracer
-  `string_view` lifetime bullet.
-- [ ] **2D.31** Coding Conventions → CUDA-Specific: drop the Tracer
-  sentence in "Kernel timing" (CudaTimer is the only timer now). Update
-  the `MatrixView` dual-use bullet (drop `block`/`is_contiguous`, drop
-  "pre-allocate 4096×4096 buffer"). Drop the `Copy.h` "single touch-point"
-  implication if present.
-- [ ] **2D.32** Coding Conventions → CUDA-Specific: drop the `Layout`
-  mentions; ColMajor is the only layout, enforced structurally.
+- [x] **2G.6.8** `scripts/server.py`: "Diff" tab. Sidebar gets a
+  second run selector (run B). Plots `median_A / median_B` vs N, one line
+  per kernel name common to both runs. `>1` = run A is slower; `<1` =
+  run A is faster. Parity line at 1.0. Per-point CI via propagation (same
+  formula as 2G.6.5). Directly answers "did k1 beat k0". If a kernel
+  exists in only one run, it's skipped.
 
-### Step 12 — Update `ARD.md`
+#### Removed views
 
-- [ ] **2D.33** §1 (Memory model): drop `Layout` from the `MatrixView` row
-  (`{ptr, rows, cols, ld}` only). Drop the `Layout` compile-time tag
-  paragraph. Drop `block()`/`is_contiguous()` from the dual-use contract.
-  Drop the "pre-allocate 4096×4096" consequence. Drop the `copy_h2d`/
-  `copy_d2h` "single touch-point" consequence (`Copy.h` is deleted).
-- [ ] **2D.34** §2 (Memcpy variant selection): supersede with "§2
-  (revised): contiguous `cudaMemcpy` only". The strided `cudaMemcpy2D`
-  path is deleted (no strided buffers after per-`N` alloc). `Copy.h` is
-  deleted; `cudaMemcpy` is called directly from `Profiler.cu`. Strike
-  through the old decision; keep the historical context.
-- [ ] **2D.35** §5 (Bench runner): supersede with "§5 (revised): per-N
-  allocation". Document: per-`N` alloc of A/B/C/C_ref (device + host),
-  per-`N` H2D timing (reported per row), `ld == N` for every kernel
-  launch, debug OOB check via contiguous `cudaMemcpy` + `memcmp`. Strike
-  through the pre-alloc + `block()` decision; keep the historical context.
-- [ ] **2D.36** §5.1 (C_ref storage): update the OOB-mitigation paragraph
-  to reflect the contiguous `cudaMemcpy` + `memcmp` (no element loop).
-- [ ] **2D.37** §7 (Timing): drop the `Tracer` bullet; `CudaTimer` is the
-  only timer. Host sweep wall-time uses inline `std::chrono::steady_clock`
-  (3 lines in `Profiler.cu`). Strike through the `Tracer` decision.
-- [ ] **2D.38** §13 (Phase 1.5 refactor inventory): add a new row for the
-  2D refactor (per-`N` alloc, `Copy.h`/`Tracer.h`/`Layout.h` deletion,
-  `block()`/`is_contiguous()` removal). Or add a new §17 phase-summary
-  section — see Step 13.
+- ~~**2G.6.2–2G.6.4** Distribution tab (box + violin)~~ — removed after
+  manual review. `fetch_samples_for_n` deleted from `db.py`; the
+  `samples` table and `insert_sample`/`fetch_samples` remain as storage
+  infrastructure.
+- ~~**2G.6.6** TFLOPS tab~~ — removed. `PEAK_SPECS` dict deleted from
+  `server.py`.
+- ~~**2G.6.7** Roofline tab~~ — removed. `DTYPE_BYTES` dict deleted from
+  `server.py`.
+- ~~**2G.6.3** N-selector sidebar control~~ — removed (only the
+  Distribution tab used it).
+- ~~**2G.6.9–2G.6.11** Shared infrastructure~~ — the tab dispatch and
+  callback were updated to handle the remaining tabs; ARD §20 documents
+  the methodology.
 
-### Step 13 — ARD phase-summary section
+### Step 7 — Validate
 
-- [ ] **2D.39** Add `## 17. Phase 2D — per-N allocation + dead-code trim`
-  to `ARD.md`. Document: what changed, why (the `ld == N` motivation), what
-  was deleted (`Tracer.h`, `Copy.h`, `Layout.h`, `block()`,
-  `is_contiguous()`, strided copy path, RowMajor branches, strided
-  microbench), validation results (test count, sweep sanity).
-
-### Step 14 — Validate
-
-- [ ] **2D.40** `cmake -B build && cmake --build build -j` — clean build,
-  no warnings from the strict set.
-- [ ] **2D.41** `ctest --test-dir build` — tests pass after Step 7
-  deletions. Confirm the reduced test count matches the deletions.
-- [ ] **2D.42** `./build/gemm_y` — sweep runs end-to-end. Verify:
-  - CSV `h2d_ns` now **varies per `N`** (was a single global value).
-  - Kernels see `ld == N` (add a temporary `printf` in `gemm_naive.cu`
-    to confirm `args.A.ld == N`, then remove before commit).
-  - Sweep wall-time `printf` still appears (inline `steady_clock`).
-- [ ] **2D.43** Ingest + dashboard sanity:
+- [ ] **2G.7.1** Build: `cmake -B build && cmake --build build -j`.
+- [ ] **2G.7.2** Tests: `ctest --test-dir build`.
+- [ ] **2G.7.3** Sweep: `sudo scripts/bench.sh`. Verify:
+  - `bench.sh` no longer attempts `-fan-gpu`; no fan warning printed.
+  - CSV has `kernel_samples_ns` column with 50 semicolon-separated values.
+  - Kernels run with raw-pointer signatures (no functional change —
+    verify output CSV matches a pre-2G run at the summary-stat level).
+- [ ] **2G.7.4** Dashboard:
   ```sh
   source pyenv/bin/activate
-  python scripts/ingest.py results/bench_sm_120_bf16.csv --label "per-N-alloc"
+  python scripts/ingest.py results/bench_sm_120_bf16.csv --label "2G-viz"
   python scripts/server.py
   ```
-  - No schema change (CSV columns unchanged). `h2d_ns` semantics shifted
-    (per-`N` now, was global) — confirm the dashboard renders without
-    errors. The Timing tab's `h2d_ns` is not plotted as a line (it's a
-    per-row context column), so no visual regression expected.
-- [ ] **2D.44** Microbench sanity:
-  ```sh
-  cmake --build build --target memcpy_microbench
-  ./build/memcpy_microbench
-  ```
-  - Contiguous + async variants still run; strided variants are gone.
+  Verify:
+  - Timing tab: significance overlay (green/red/gray rings) on each point.
+  - Speedup tab: ratio vs N with propagated CI, parity at 1.0.
+  - Diff tab: run A vs run B ratio, parity at 1.0.
+  - All tabs respect sidebar filters (arch/dtype/runs/class/scale/height).
+- [ ] **2G.7.5** `Stats.h` dead code gone; `server.py` comments match
+  values.
 
 ---
 
@@ -221,12 +262,15 @@ documentation) but does not define the methodology.
 - [ ] **2C.2.1** Define the iteration workflow: how to label runs
   (`--label "k1-tiling-128"`?), how to compare `k_n` vs `k_(n-1)` in the
   dashboard (run multi-select already exists — sufficient? or need a
-  diff view?), how to record the hypothesis for each commit (commit body
-  per AGENTS.md — sufficient? or need a sidecar file?).
-- [ ] **2C.2.2** Decide on statistical rigor: current 20 warmup / 50
+  diff view? — **2G.6.8 adds a diff view**), how to record the hypothesis
+  for each commit (commit body per AGENTS.md — sufficient? or need a
+  sidecar file?).
+- [ ] **2C.2.2** ~~Decide on statistical rigor: current 20 warmup / 50
   timed median. Is median enough? Need min (best-case) or p99 (tail)?
-  Need confidence intervals? If yes, extend `Profiler::run_sweep` to
-  emit more stats and the CSV/DB schema to store them.
+  Need confidence intervals?~~ **Resolved by Phase 2E.3** — 95% CI for
+  the median + p95 + std, with per-point error bars on the dashboard.
+  `kTimed` stays at 50 (p95 is the 48th sample; p99 would need 200+
+  samples — deferred until tail analysis becomes important).
 - [ ] **2C.2.3** Profiling tool setup — nsys / ncu. Currently out of
   scope (see Out of scope section). Decide whether to bring them in
   here, or defer to a later phase. If bringing in: wrapper scripts,
@@ -249,7 +293,8 @@ with a debugging approach driven by the 2C.2 methodology.
 
 - [ ] **2C.3.1** First tiled TC kernel for bf16 on sm_120 (file name
   TBD — `gemm_bf16_k1.cu` during development, renamed to
-  `gemm_bf16_tiled128.cu` when finalized, per ARD §16).
+  `gemm_bf16_tiled128.cu` when finalized, per ARD §16). Device kernel
+  takes raw pointers + ints per Phase 2G.2.
 - [ ] **2C.3.2** Mirror on sm_90 (same algorithm, sm_90 wmma API).
 - [ ] **2C.3.3** Iterate: one variable per commit (tile size, warp count,
   K-dim unroll, memory layout). Ingest each iteration, compare in
@@ -281,9 +326,10 @@ with a debugging approach driven by the 2C.2 methodology.
 - Multi-GPU / multi-node.
 - fp32 pedantic (CUDA cores) — dropped entirely; only tf32 path for
   32-bit float storage (see ARD §9).
-- TFLOPS metric — deferred. Needs peak-TFLOPS lookup per `(arch, dtype)`.
-  Will be added in a future sub-phase after the `% perf vs cuBLAS` metric
-  is in place.
 - RowMajor layout — deleted in Phase 2D. If a future phase needs it,
   re-add a `Layout` tag + the `RowMajor` branches (5-line re-add per
   call site; not worth carrying as dead code).
+- Fan control orchestration — removed in Phase 2G. The auto-fan curve is
+  the only path; if a future datacenter deployment needs manual fan
+  control, re-add a `-fan-gpu` step to `bench.sh` behind a host-detect
+  guard.

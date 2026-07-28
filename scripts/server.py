@@ -4,11 +4,12 @@
 Served at http://localhost:8050. Reads from db/gemm_y.db (the source of
 truth); never from CSV. Run `ingest.py` first to populate the DB.
 
-Layout: single page, sidebar + four tabs (Timing / Comparison / Accuracy /
-Run History). Sidebar filters: arch, dtype, kernel class (Custom/cuBLAS),
-runs multi-select, scale (log-log / linear). The Comparison tab plots
-`perf_pct` vs N (ARD §15) with a parity line at 0; it ignores the scale
-toggle (always linear-y, log-x).
+Layout: single page, sidebar + six tabs (Timing / Comparison / Accuracy /
+Speedup / Diff / Run History). Sidebar filters: arch, dtype, kernel class
+(Custom/cuBLAS), runs multi-select, Diff run B (single-select), scale
+(log-log / linear), chart height. The Comparison tab plots `perf_pct` vs N
+(ARD §15) with a parity line at 0; it ignores the scale toggle (always
+linear-y, log-x).
 
 The sidebar's run dropdown is populated once at startup. If you ingest new
 runs while the server is running, restart the server to pick them up.
@@ -41,15 +42,17 @@ OKABE_ITO = [
 ]
 CUBLAS_COLOR = "#000000"  # black; cuBLAS is the reference line
 
+# Significance ring colors for the Timing tab overlay (2G.6.1).
+SIG_FASTER = "#009E73"   # green — custom is significantly faster
+SIG_SLOWER = "#D55E00"   # vermillion — custom is significantly slower
+SIG_INCONCLUSIVE = "#999999"  # gray — CIs overlap, inconclusive
+
 # The 14-size square sweep (powers of 2 + midpoints). Used as log-x tickvals
 SWEEP_SIZES = [32, 64, 96, 128, 192, 256, 384, 512, 768,
                1024, 1536, 2048, 3072, 4096]
 
-#PLOT_BG_COLOR = "#f0f0f0"   # light gray plot area — visible boundary vs white page
-#PAPER_BG_COLOR = "#ffffff"  # white margin / page
-
-PLOT_BG_COLOR = "#ffffff"   # light gray plot area — visible boundary vs white page
-PAPER_BG_COLOR = "#f0f0f0"  # white margin / page
+PLOT_BG_COLOR = "#ffffff"   # white plot area
+PAPER_BG_COLOR = "#f0f0f0"  # light gray page / margin
 
 BASE_FONT_SIZE = 14
 LEGEND_FONT_SIZE = 12
@@ -165,9 +168,52 @@ def _perf_pct(row: dict) -> float | None:
         return None
 
 
+def _significance(row: dict) -> str | None:
+    """Significance of custom vs cuBLAS at one point (2G.6.1, ARD §20).
+
+    Returns 'faster', 'slower', 'inconclusive', or None (missing CI data).
+    A point is significant (custom ≠ cuBLAS) if the custom CI and cuBLAS CI
+    do not overlap vertically. Overlap -> inconclusive at 95%.
+    """
+    k_lo = row.get("kernel_ci_low_ns")
+    k_hi = row.get("kernel_ci_high_ns")
+    r_lo = row.get("ref_kernel_ci_low_ns")
+    r_hi = row.get("ref_kernel_ci_high_ns")
+    if None in (k_lo, k_hi, r_lo, r_hi):
+        return None
+    # No overlap -> significant. Custom is faster if its CI is entirely below.
+    if k_hi < r_lo:
+        return "faster"
+    if k_lo > r_hi:
+        return "slower"
+    return "inconclusive"
+
+
+def _propagated_ci_half(median: float, std: float,
+                        ref_median: float, ref_std: float) -> float | None:
+    """First-order Gaussian CI half-width for a ratio median/ref_median
+    (2G.6.5 / 2G.6.8, ARD §20).
+
+    ``ratio = median / ref_median``; the propagated relative SE is
+    ``sqrt((σ/median)^2 + (σ_ref/median_ref)^2)`` and the CI half-width is
+    ``ratio * 1.253 * relative_se / sqrt(n)`` (the 1.253 factor is the
+    asymptotic SE of the median; n=50 is implicit — we fold it into the
+    std which is already the sample std). For simplicity we use the
+    asymptotic form: ``ratio * sqrt((std/median)^2 + (ref_std/ref_median)^2)``
+    which is the first-order propagation without the 1.253/sqrt(n) factor
+    (the std already reflects the sample size).
+    """
+    if not median or not ref_median or median <= 0 or ref_median <= 0:
+        return None
+    rel_k = (std / median) if std else 0.0
+    rel_r = (ref_std / ref_median) if ref_std else 0.0
+    return median / ref_median * (rel_k ** 2 + rel_r ** 2) ** 0.5
+
+
 def _timing_figure(rows: list[dict], log_log: bool,
                   height: int = DEFAULT_CHART_HEIGHT) -> go.Figure:
-    """kernel_median_ns vs N, one line per (run, kernel)."""
+    """kernel_median_ns vs N, one line per (run, kernel), with per-point
+    95% CI error bars (ARD §19)."""
     fig = go.Figure()
     # Group rows by (run_id, kernel_name) so each gets its own line.
     series: dict[tuple[int, str], list[dict]] = {}
@@ -186,6 +232,15 @@ def _timing_figure(rows: list[dict], log_log: bool,
         rs_sorted = sorted(rs, key=lambda r: r["n"])
         xs = [r["n"] for r in rs_sorted]
         ys = [r["kernel_median_ns"] for r in rs_sorted]
+        # Per-point 95% CI half-width: median - ci_low (= ci_high - median,
+        # since the CI is symmetric). None where stats are missing (old runs).
+        def _ci_half(r: dict) -> float | None:
+            med = r.get("kernel_median_ns")
+            lo = r.get("kernel_ci_low_ns")
+            if med is None or lo is None:
+                return None
+            return med - lo
+        err_y = [_ci_half(r) for r in rs_sorted]
         # customdata carries the hover extras.
         customdata = [
             [
@@ -197,6 +252,14 @@ def _timing_figure(rows: list[dict], log_log: bool,
                 r["ref_kernel_median_ns"],
                 _speedup(r["kernel_median_ns"], r["ref_kernel_median_ns"]),
                 _perf_pct(r),
+                r.get("kernel_std_ns"),
+                r.get("kernel_p95_ns"),
+                r.get("kernel_ci_low_ns"),
+                r.get("kernel_ci_high_ns"),
+                r.get("ref_kernel_std_ns"),
+                r.get("ref_kernel_p95_ns"),
+                r.get("ref_kernel_ci_low_ns"),
+                r.get("ref_kernel_ci_high_ns"),
             ]
             for r in rs_sorted
         ]
@@ -205,16 +268,19 @@ def _timing_figure(rows: list[dict], log_log: bool,
         # are distinguishable.
         label = f"{kname} (run {run_id})"
         # Shared hovertemplate — thousands separator on ns values.
-        # customdata indices (TODO 2B.3.1 — fixed from [4]/[5] to [5]/[6]):
+        # customdata indices:
         #   [0] arch   [1] dtype   [2] class   [3] kernel_desc
         #   [4] kernel_median_ns   [5] ref_kernel_median_ns
         #   [6] speedup            [7] perf_pct
-        # Hover fractions rounded to a 2-decimal ceiling (TODO 2B.3.8):
-        # speedup %.3f -> %.2f, perf_pct %+.1f -> %+.2f. Integer ns values
-        # stay integer (no fraction to round).
+        #   [8] kernel_std_ns      [9] kernel_p95_ns
+        #   [10] kernel_ci_low_ns  [11] kernel_ci_high_ns
+        #   [12] ref_kernel_std_ns     [13] ref_kernel_p95_ns
+        #   [14] ref_kernel_ci_low_ns  [15] ref_kernel_ci_high_ns
+        #
         # perf_pct is None for cuBLAS rows; the %{customdata[7]:+.2f} format
-        # renders 'nan' for None, so we use a conditional via a separate
-        # cuBLAS hovertemplate below.
+        # renders 'nan' for None, so cuBLAS uses a separate hovertemplate.
+        # Stat fields may be None for old (pre-2E) runs; format with a
+        # fallback that renders '—' for None.
         hovertemplate = (
             "<b>%{fullData.name}</b><br>"
             "N=%{x}<br>"
@@ -223,7 +289,13 @@ def _timing_figure(rows: list[dict], log_log: bool,
             "dtype=%{customdata[1]}<br>"
             "class=%{customdata[2]}<br>"
             "desc=%{customdata[3]}<br>"
+            "std=%{customdata[8]:,.0f} ns<br>"
+            "p95=%{customdata[9]:,.0f} ns<br>"
+            "95% CI=[%{customdata[10]:,.0f}, %{customdata[11]:,.0f}] ns<br>"
             "ref_median=%{customdata[5]:,.0f} ns<br>"
+            "ref_std=%{customdata[12]:,.0f} ns<br>"
+            "ref_p95=%{customdata[13]:,.0f} ns<br>"
+            "ref_95% CI=[%{customdata[14]:,.0f}, %{customdata[15]:,.0f}] ns<br>"
             "speedup=%{customdata[6]:.2f}x<br>"
             "perf=%{customdata[7]:+.2f}% vs cuBLAS (+ = faster)"
             "<extra></extra>"
@@ -236,10 +308,24 @@ def _timing_figure(rows: list[dict], log_log: bool,
             "dtype=%{customdata[1]}<br>"
             "class=%{customdata[2]}<br>"
             "desc=%{customdata[3]}<br>"
+            "std=%{customdata[8]:,.0f} ns<br>"
+            "p95=%{customdata[9]:,.0f} ns<br>"
+            "95% CI=[%{customdata[10]:,.0f}, %{customdata[11]:,.0f}] ns<br>"
             "ref_median=%{customdata[5]:,.0f} ns<br>"
             "speedup=%{customdata[6]:.2f}x<br>"
             "perf=— (cuBLAS reference)"
             "<extra></extra>"
+        )
+        # Per-point 95% CI error bars. Plotly renders a vertical line from
+        # median - half to median + half at each point. If the cuBLAS and
+        # custom error bars don't overlap at a given N, the difference is
+        # statistically significant (ARD §19).
+        err_bar = dict(
+            type="data",
+            array=err_y,
+            thickness=2,
+            width=4,
+            visible=True,
         )
         if is_cublas:
             fig.add_trace(
@@ -253,6 +339,7 @@ def _timing_figure(rows: list[dict], log_log: bool,
                     opacity=0.6,  # semi-transparent so custom lines show through
                     customdata=customdata,
                     hovertemplate=cublas_hovertemplate,
+                    error_y=err_bar,
                 )
             )
         else:
@@ -268,8 +355,40 @@ def _timing_figure(rows: list[dict], log_log: bool,
                     marker=dict(color=color),
                     customdata=customdata,
                     hovertemplate=hovertemplate,
+                    error_y=err_bar,
                 )
             )
+            # Significance overlay (2G.6.1): open-circle ring behind each
+            # custom point, colored by whether the custom CI and cuBLAS CI
+            # overlap. Skip if CI data is missing (old runs).
+            sig_colors = []
+            for r in rs_sorted:
+                sig = _significance(r)
+                if sig == "faster":
+                    sig_colors.append(SIG_FASTER)
+                elif sig == "slower":
+                    sig_colors.append(SIG_SLOWER)
+                else:
+                    sig_colors.append(SIG_INCONCLUSIVE)
+            if any(s is not None and r.get("kernel_ci_low_ns") is not None
+                   for s, r in zip(sig_colors, rs_sorted)):
+                fig.add_trace(
+                    go.Scatter(
+                        x=xs,
+                        y=ys,
+                        mode="markers",
+                        name=f"{label} (significance)",
+                        marker=dict(
+                            symbol="circle-open",
+                            size=12,
+                            color=sig_colors,
+                            line=dict(width=2),
+                        ),
+                        opacity=0.8,
+                        showlegend=False,
+                        hoverinfo="skip",
+                    )
+                )
 
     log_x = log_y = bool(log_log)
     fig.update_layout(**_base_layout(
@@ -281,6 +400,125 @@ def _timing_figure(rows: list[dict], log_log: bool,
         height=height,
     ))
     return fig
+
+
+def _speedup_figure(rows: list[dict],
+                    height: int = DEFAULT_CHART_HEIGHT) -> go.Figure:
+    """ref_median / kernel_median (speedup ratio) vs N (2G.6.5, ARD §20).
+
+    >1 = custom faster than cuBLAS. Parity line at 1.0. Per-point CI via
+    first-order Gaussian propagation. cuBLAS trace excluded (ratio = 1 by
+    definition). Log-y default (ratios span 0.1–10×).
+    """
+    fig = go.Figure()
+    custom_rows = [r for r in rows if not _is_cublas(r["kernel_name"])
+                   and r.get("kernel_median_ns") and r.get("ref_kernel_median_ns")]
+    series: dict[tuple[int, str], list[dict]] = {}
+    for r in custom_rows:
+        series.setdefault((r["run_id"], r["kernel_name"]), []).append(r)
+
+    color_idx = 0
+    for (run_id, kname), rs in sorted(series.items(), key=lambda kv: (kv[0][1], kv[0][0])):
+        rs_sorted = sorted(rs, key=lambda r: r["n"])
+        xs = [r["n"] for r in rs_sorted]
+        ys = [r["ref_kernel_median_ns"] / r["kernel_median_ns"] for r in rs_sorted]
+        err_y = [_propagated_ci_half(
+            r["kernel_median_ns"], r.get("kernel_std_ns") or 0.0,
+            r["ref_kernel_median_ns"], r.get("ref_kernel_std_ns") or 0.0)
+            for r in rs_sorted]
+        customdata = [[r["kernel_median_ns"], r["ref_kernel_median_ns"]] for r in rs_sorted]
+        color = OKABE_ITO[color_idx % len(OKABE_ITO)]
+        color_idx += 1
+        label = f"{kname} (run {run_id})"
+        fig.add_trace(go.Scatter(
+            x=xs, y=ys, mode="lines+markers", name=label,
+            line=dict(color=color), marker=dict(color=color),
+            customdata=customdata,
+            hovertemplate=(
+                "<b>%{fullData.name}</b><br>"
+                "N=%{x}<br>"
+                "speedup=%{y:.2f}x<br>"
+                "custom_median=%{customdata[0]:,.0f} ns<br>"
+                "ref_median=%{customdata[1]:,.0f} ns"
+                "<extra></extra>"
+            ),
+            error_y=dict(type="data", array=err_y, thickness=2, width=4,
+                         visible=True),
+        ))
+
+    fig.add_hline(y=1.0, line=dict(color=CUBLAS_COLOR, width=1, dash="dash"),
+                  annotation_text="parity (1.0x)", annotation_position="top left")
+    fig.update_layout(**_base_layout(
+        title="Speedup vs cuBLAS (>1 = faster)",
+        x_title="N", y_title="ref_median / kernel_median",
+        log_x=True, log_y=True, zeroline_y=True, height=height,
+    ))
+    return fig
+
+
+def _diff_figure(rows: list[dict], run_a: int, run_b: int,
+                 height: int = DEFAULT_CHART_HEIGHT) -> go.Figure:
+    """Cross-run diff: median_A / median_B vs N (2G.6.8, ARD §20).
+
+    >1 = run A is slower; <1 = run A is faster. Parity at 1.0. One line per
+    kernel name common to both runs. Per-point CI via propagation.
+    """
+    fig = go.Figure()
+    # Group by kernel_name within each run.
+    by_run: dict[int, dict[str, list[dict]]] = {run_a: {}, run_b: {}}
+    for r in rows:
+        if r["run_id"] not in by_run:
+            continue
+        by_run[r["run_id"]].setdefault(r["kernel_name"], []).append(r)
+
+    common_kernels = set(by_run[run_a].keys()) & set(by_run[run_b].keys())
+    color_idx = 0
+    for kname in sorted(common_kernels):
+        rs_a = sorted(by_run[run_a][kname], key=lambda r: r["n"])
+        rs_b = {r["n"]: r for r in by_run[run_b][kname]}
+        xs, ys, err = [], [], []
+        for r in rs_a:
+            n = r["n"]
+            if n not in rs_b:
+                continue
+            rb = rs_b[n]
+            med_a = r["kernel_median_ns"]
+            med_b = rb["kernel_median_ns"]
+            if not med_a or not med_b:
+                continue
+            xs.append(n)
+            ys.append(med_a / med_b)
+            err.append(_propagated_ci_half(
+                med_a, r.get("kernel_std_ns") or 0.0,
+                med_b, rb.get("ref_kernel_std_ns") or 0.0))
+        if not xs:
+            continue
+        color = OKABE_ITO[color_idx % len(OKABE_ITO)]
+        color_idx += 1
+        fig.add_trace(go.Scatter(
+            x=xs, y=ys, mode="lines+markers",
+            name=f"{kname} (A={run_a}/B={run_b})",
+            line=dict(color=color), marker=dict(color=color),
+            error_y=dict(type="data", array=err, thickness=2, width=4,
+                         visible=True),
+            hovertemplate=(
+                "<b>%{fullData.name}</b><br>"
+                "N=%{x}<br>"
+                "ratio A/B=%{y:.3f}<br>"
+                "(<1 = A faster, >1 = B faster)"
+                "<extra></extra>"
+            ),
+        ))
+
+    fig.add_hline(y=1.0, line=dict(color=CUBLAS_COLOR, width=1, dash="dash"),
+                  annotation_text="parity (1.0)", annotation_position="top left")
+    fig.update_layout(**_base_layout(
+        title=f"Cross-run diff: run {run_a} / run {run_b} (<1 = A faster)",
+        x_title="N", y_title=f"median_{run_a} / median_{run_b}",
+        log_x=True, log_y=True, zeroline_y=True, height=height,
+    ))
+    return fig
+
 
 
 def _accuracy_figure(rows: list[dict], log_log: bool,
@@ -554,6 +792,16 @@ def build_app() -> dash.Dash:
                             multi=True,
                         ),
                     ], style={"marginBottom": "12px"}),
+                    # Second run selector for the Diff tab (2G.6.8).
+                    html.Div([
+                        html.Label("Diff run B", style={"fontSize": 14}),
+                        dcc.Dropdown(
+                            id="filter-run-b",
+                            options=run_options,
+                            value=run_options[-1]["value"] if run_options else None,
+                            multi=False,
+                        ),
+                    ], style={"marginBottom": "12px"}),
                     html.Div([
                         html.Label("Scale", style={"fontSize": 14}),
                         dcc.RadioItems(
@@ -596,6 +844,8 @@ def build_app() -> dash.Dash:
                             dcc.Tab(label="Timing", value="timing"),
                             dcc.Tab(label="Comparison", value="comparison"),
                             dcc.Tab(label="Accuracy", value="accuracy"),
+                            dcc.Tab(label="Speedup", value="speedup"),
+                            dcc.Tab(label="Diff", value="diff"),
                             dcc.Tab(label="Run History", value="runs"),
                         ],
                     ),
@@ -614,9 +864,10 @@ def build_app() -> dash.Dash:
         Input("filter-runs", "value"),
         Input("filter-scale", "value"),
         Input("filter-chart-height", "value"),
+        Input("filter-run-b", "value"),
     )
     def render_tab(tab, arch, dtypes_sel, classes, run_ids, scale,
-                   chart_height):
+                   chart_height, run_b):
         if tab == "runs":
             rows = _runs_table()
             return dt.DataTable(
@@ -657,6 +908,15 @@ def build_app() -> dash.Dash:
             return dcc.Graph(figure=_comparison_figure(rows, height=height))
         if tab == "accuracy":
             return dcc.Graph(figure=_accuracy_figure(rows, log_log, height=height))
+        if tab == "speedup":
+            return dcc.Graph(figure=_speedup_figure(rows, height=height))
+        if tab == "diff":
+            # Diff uses run A = first selected run, run B = the sidebar's
+            # Diff-run-B selector.
+            run_a = (run_ids or [None])[0]
+            if not run_a or not run_b:
+                return html.Div("Select at least one run in 'Runs' and a run in 'Diff run B'.")
+            return dcc.Graph(figure=_diff_figure(rows, run_a, run_b, height=height))
         return html.Div("unknown tab")
 
     return app

@@ -6,10 +6,14 @@
 // measured once per N and reused as ref_* for all kernels.
 //
 // Per-N allocation (ARD §5 revised): A/B/C/C_ref (device + host) are
-// allocated N×N inside the per-N loop. ld == N for every kernel launch
-// (was ld == 4096 under the pre-alloc strategy). H2D A+B is timed per N
-// and reported in the h2d_ns column for every row at that N. cudaMemcpy
-// is called directly (no Copy.h wrapper); buffers are contiguous.
+// allocated N×N inside the per-N loop. ld == N for every kernel launch.
+// cudaMemcpy is called directly (no Copy.h wrapper); buffers are contiguous.
+//
+// Measurement (ARD §7, §19): all kernels and cuBLAS run on the owned
+// stream_ (one stream per Profiler). A cudaStreamSynchronize after each
+// warmup loop ensures the GPU is idle before the timed loop begins. The
+// timer_ member is reused across the entire sweep (one event pair). h2d_ns
+// and d2h_ns are not reported — harness overhead is not kernel performance.
 
 #include "Profiler.h"
 
@@ -36,6 +40,21 @@ namespace {
 constexpr int kWarmup = 20;
 constexpr int kTimed = 50;
 
+// Serialize the kTimed elapsed-ms samples (converted to ns) as a
+// semicolon-separated string for the CSV `kernel_samples_ns` column.
+// Parsed by ingest.py into the `samples` table (ARD §20).
+std::string serialize_samples_ns(const std::vector<float>& ms) {
+    std::string out;
+    out.reserve(ms.size() * 12);  // ~12 chars per "1234567.89;"
+    for (std::size_t i = 0; i < ms.size(); ++i) {
+        if (i != 0) out.push_back(';');
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.6f", static_cast<double>(ms[i]) * 1e6);
+        out += buf;
+    }
+    return out;
+}
+
 } // namespace
 
 template <typename T>
@@ -43,8 +62,9 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
     SweepResult result;
 
     std::printf("[Profiler] arch=%s dtype=%s kernels=%zu sizes=%zu  "
-                "h2d=per-N (in CSV)\n",
-                kArchName, dtypes::name<T>().data(), kernels_.size(), sizes.size());
+                "warmup=%d timed=%d\n",
+                kArchName, dtypes::name<T>().data(), kernels_.size(), sizes.size(),
+                kWarmup, kTimed);
 
     const auto sweep_start = std::chrono::steady_clock::now();
 
@@ -65,13 +85,9 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
         // Fill host A, B with the deterministic pattern (N×N directly).
         bench::fill_sequential<T>(hA.view(), hB.view());
 
-        // H2D A+B (timed per N; reported in every CSV row at this N).
-        CudaTimer h2d_timer;
-        h2d_timer.start();
+        // H2D A+B (untimed; harness overhead, not kernel performance).
         CUDA_CHECK(cudaMemcpy(dA.data(), hA.data(), hA.bytes(), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(dB.data(), hB.data(), hB.bytes(), cudaMemcpyHostToDevice));
-        h2d_timer.stop();
-        const double h2d_ns = static_cast<double>(h2d_timer.elapsed_ms()) * 1e6;
 
         auto dA_v = dA.view();
         auto dB_v = dB.view();
@@ -79,31 +95,28 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
         auto dC_ref_v = dC_ref.view();
 
         // 1) cuBLAS reference -> dC_ref. Warmup + timed. Measured ONCE per N;
-        //    its kernel_min_ns / kernel_median_ns are reused as ref_* for every
-        //    subsequent kernel row at this N.
+        //    its stats are reused as ref_* for every subsequent kernel row at this N.
         bench::TimedStats ref_stats;
-        double ref_d2h_ns = 0.0;
+        std::string ref_samples_ns;
         {
             for (int i = 0; i < kWarmup; ++i) {
-                cublas_gemm(cublas_, dA_v, dB_v, dC_ref_v);
+                cublas_gemm(cublas_, dA_v, dB_v, dC_ref_v, stream_);
             }
+            CUDA_CHECK(cudaStreamSynchronize(stream_));
+
             std::vector<float> ms; ms.reserve(kTimed);
-            CudaTimer t;
             for (int i = 0; i < kTimed; ++i) {
-                t.start();
-                cublas_gemm(cublas_, dA_v, dB_v, dC_ref_v);
-                t.stop();
-                ms.push_back(t.elapsed_ms());
+                timer_.start(stream_);
+                cublas_gemm(cublas_, dA_v, dB_v, dC_ref_v, stream_);
+                timer_.stop(stream_);
+                ms.push_back(timer_.elapsed_ms());
             }
             ref_stats = bench::summarize_ns(ms);
+            ref_samples_ns = serialize_samples_ns(ms);
 
-            // D2H C_ref once (timed).
-            CudaTimer d2h_t;
-            d2h_t.start();
+            // D2H C_ref once (untimed).
             CUDA_CHECK(cudaMemcpy(hC_ref.data(), dC_ref.data(), dC_ref.bytes(),
                                   cudaMemcpyDeviceToHost));
-            d2h_t.stop();
-            ref_d2h_ns = static_cast<double>(d2h_t.elapsed_ms()) * 1e6;
         }
 
         // Push the cuBLAS row first per N. ref_* == kernel_* (self-referential).
@@ -115,14 +128,21 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
             row.N = N;
             row.kernel_name = "cublas";
             row.kernel_desc = "cublasGemmEx reference (fp32 accum)";
-            row.h2d_ns = h2d_ns;
             row.kernel_min_ns = ref_stats.min_ns;
             row.kernel_median_ns = ref_stats.median_ns;
-            row.d2h_ns = ref_d2h_ns;
+            row.kernel_std_ns = ref_stats.std_ns;
+            row.kernel_p95_ns = ref_stats.p95_ns;
+            row.kernel_ci_low_ns = ref_stats.ci_low_ns;
+            row.kernel_ci_high_ns = ref_stats.ci_high_ns;
             row.ref_kernel_min_ns = ref_stats.min_ns;
             row.ref_kernel_median_ns = ref_stats.median_ns;
+            row.ref_kernel_std_ns = ref_stats.std_ns;
+            row.ref_kernel_p95_ns = ref_stats.p95_ns;
+            row.ref_kernel_ci_low_ns = ref_stats.ci_low_ns;
+            row.ref_kernel_ci_high_ns = ref_stats.ci_high_ns;
             row.max_abs_err = 0.0;
             row.max_rel_err = 0.0;
+            row.kernel_samples_ns = ref_samples_ns;
             result.rows.push_back(std::move(row));
         }
 
@@ -143,31 +163,29 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
             }
         #endif
 
-            // Warmup (untimed).
+            // Warmup (untimed). Sync after warmup so the timed loop starts
+            // from an idle GPU (no warmup launches still in flight).
             for (int i = 0; i < kWarmup; ++i) {
-                k.run(args, nullptr);
+                k.run(args, stream_);
             }
+            CUDA_CHECK(cudaStreamSynchronize(stream_));
             CUDA_CHECK_LAST_ERROR();
 
             // Timed.
             std::vector<float> ms; ms.reserve(kTimed);
-            CudaTimer t;
             for (int i = 0; i < kTimed; ++i) {
-                t.start();
-                k.run(args, nullptr);
-                t.stop();
-                ms.push_back(t.elapsed_ms());
+                timer_.start(stream_);
+                k.run(args, stream_);
+                timer_.stop(stream_);
+                ms.push_back(timer_.elapsed_ms());
             }
             CUDA_CHECK_LAST_ERROR();
             const bench::TimedStats s = bench::summarize_ns(ms);
+            const std::string samples_ns = serialize_samples_ns(ms);
 
-            // D2H C once (timed).
-            CudaTimer d2h_t;
-            d2h_t.start();
+            // D2H C once (untimed).
             CUDA_CHECK(cudaMemcpy(hC.data(), dC.data(), dC.bytes(),
                                   cudaMemcpyDeviceToHost));
-            d2h_t.stop();
-            const double d2h_ns = static_cast<double>(d2h_t.elapsed_ms()) * 1e6;
 
             // Accuracy vs C_ref (host-side, fp64).
             const ErrReport<T> err = compare<T>(hC.view(), hC_ref.view());
@@ -201,7 +219,7 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
                 continue;
             }
 
-            // Push the kernel row. ref_* reuse the cuBLAS row's kernel_*.
+            // Push the kernel row. ref_* reuse the cuBLAS row's stats.
             {
                 SweepRow row;
                 row.arch = kArchName;
@@ -209,14 +227,21 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
                 row.N = N;
                 row.kernel_name = k.name;
                 row.kernel_desc = k.description;
-                row.h2d_ns = h2d_ns;
                 row.kernel_min_ns = s.min_ns;
                 row.kernel_median_ns = s.median_ns;
-                row.d2h_ns = d2h_ns;
+                row.kernel_std_ns = s.std_ns;
+                row.kernel_p95_ns = s.p95_ns;
+                row.kernel_ci_low_ns = s.ci_low_ns;
+                row.kernel_ci_high_ns = s.ci_high_ns;
                 row.ref_kernel_min_ns = ref_stats.min_ns;
                 row.ref_kernel_median_ns = ref_stats.median_ns;
+                row.ref_kernel_std_ns = ref_stats.std_ns;
+                row.ref_kernel_p95_ns = ref_stats.p95_ns;
+                row.ref_kernel_ci_low_ns = ref_stats.ci_low_ns;
+                row.ref_kernel_ci_high_ns = ref_stats.ci_high_ns;
                 row.max_abs_err = err.max_abs;
                 row.max_rel_err = err.max_rel;
+                row.kernel_samples_ns = samples_ns;
                 result.rows.push_back(std::move(row));
             }
 

@@ -45,13 +45,21 @@ void write_csv(const gemm_y::SweepResult& result, const std::string& path) {
         std::abort();
     }
     csv.write_header(
-        "arch,dtype,N,kernel_name,kernel_desc,h2d_ns,kernel_min_ns,kernel_median_ns,"
-        "d2h_ns,ref_kernel_min_ns,ref_kernel_median_ns,max_abs_err,max_rel_err");
+        "arch,dtype,N,kernel_name,kernel_desc,"
+        "kernel_min_ns,kernel_median_ns,kernel_std_ns,kernel_p95_ns,"
+        "kernel_ci_low_ns,kernel_ci_high_ns,"
+        "ref_kernel_min_ns,ref_kernel_median_ns,ref_kernel_std_ns,"
+        "ref_kernel_p95_ns,ref_kernel_ci_low_ns,ref_kernel_ci_high_ns,"
+        "max_abs_err,max_rel_err,kernel_samples_ns");
     for (const auto& r : result.rows) {
         csv.append_row(r.arch, r.dtype, r.N, r.kernel_name, r.kernel_desc,
-                       r.h2d_ns, r.kernel_min_ns, r.kernel_median_ns,
-                       r.d2h_ns, r.ref_kernel_min_ns, r.ref_kernel_median_ns,
-                       r.max_abs_err, r.max_rel_err);
+                       r.kernel_min_ns, r.kernel_median_ns,
+                       r.kernel_std_ns, r.kernel_p95_ns,
+                       r.kernel_ci_low_ns, r.kernel_ci_high_ns,
+                       r.ref_kernel_min_ns, r.ref_kernel_median_ns,
+                       r.ref_kernel_std_ns, r.ref_kernel_p95_ns,
+                       r.ref_kernel_ci_low_ns, r.ref_kernel_ci_high_ns,
+                       r.max_abs_err, r.max_rel_err, r.kernel_samples_ns);
     }
 }
 
@@ -107,17 +115,24 @@ void write_meta(const std::string& meta_path,
 void profile_bf16_kernels(const std::string& arch) {
     using T = gemm_y::dtypes::bf16;
     gemm_y::Profiler<T> prof;
+
+
+    // Register Test Kernels for profiling
     prof.register_kernel<gemm_y::NaiveGemm<T>>();
     prof.register_kernel<gemm_y::k0>();
+
+
     const gemm_y::SweepResult result = prof.run_sweep(kSweepSizes);
 
     const std::string out_csv = "results/bench_" + arch + "_bf16.csv";
     const std::string out_meta = "results/bench_" + arch + "_bf16.meta";
     std::printf("gemm_y: arch=%s dtype=bf16  out=%s\n", arch.c_str(), out_csv.c_str());
     write_csv(result, out_csv);
+
+
+
     std::vector<std::pair<std::string, std::string>> kernels;
 
-    //Register Test Kernels here
     kernels.emplace_back(std::string(gemm_y::NaiveGemm<T>::name()),
                             std::string(gemm_y::NaiveGemm<T>::description()));
     kernels.emplace_back(std::string(gemm_y::k0::name()),
@@ -139,11 +154,14 @@ void profile_fp16_kernels(const std::string& arch) {
     const std::string out_csv = "results/bench_" + arch + "_fp16.csv";
     const std::string out_meta = "results/bench_" + arch + "_fp16.meta";
     std::printf("gemm_y: arch=%s dtype=fp16  out=%s\n", arch.c_str(), out_csv.c_str());
+    
     write_csv(result, out_csv);
     std::vector<std::pair<std::string, std::string>> kernels;
+    
     kernels.emplace_back(std::string(gemm_y::NaiveGemm<T>::name()),
                             std::string(gemm_y::NaiveGemm<T>::description()));
     write_meta(out_meta, arch, "fp16", 20, 50, gemm_y::kRelErrTol<T>(), kernels);
+    
     std::printf("gemm_y: done. %zu rows written to %s\n", result.rows.size(), out_csv.c_str());
 }
 
@@ -167,19 +185,7 @@ void profile_tf32_kernels(const std::string& arch) {
 
 int main() {
     const std::string arch = gemm_y::kArchName;
-
-    // bf16: register NaiveGemm (the existing baseline kernel) and k0
-    // (dummy custom kernel — verbatim naive body; workflow development).
     profile_bf16_kernels(arch);
 
-
-
-    // fp16: register NaiveGemm (custom kernel for comparison vs cuBLAS).
-    // profile_fp16_kernels
-
-
-    // tfloat: register NaiveGemm (custom kernel for comparison vs cuBLAS).
-    // tfloat = tf32 path (TC), not pedantic fp32 (CUDA cores).
-    // profile_tf32_kernels();
-    return 0;
+   return 0;
 }
