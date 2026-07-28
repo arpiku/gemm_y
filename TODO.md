@@ -7,193 +7,205 @@
 
 ---
 
-## Phase 2B.3 — Dashboard polish round 2 (post-review fixes)
+## Phase 2D — Bench-runner refactor: per-N allocation + dead-code trim
 
-Goal: fix the functional hover bug surfaced during the 2B.2 review and apply
-the three UI polish items the user reported. Python only; no C++ changes.
+Goal: replace the pre-allocated 4096×4096 + `block()` slicing strategy with
+per-`N` allocation so `ld == N` for every kernel launch. Trim dead surface
+area (`Tracer.h`, `Copy.h`, `Layout`, `block()`, `is_contiguous()`,
+strided-copy path, RowMajor branches, strided microbench). No new features;
+correctness + hygiene only.
 
-**Context:** Phase 2B.2 (commit `3281428`) shipped the `% perf vs cuBLAS`
-metric, Comparison tab, and `delete_run.py` CLI. The user's manual UI review
-(2B.2.7) found: (a) a hovertemplate `customdata` index bug showing the wrong
-values, (b) sparse/faint grid, (c) low contrast between plot area and page
-background + small font, (d) overlapping tol annotations in the accuracy
-tab's top-right corner. Round 2 (this phase) addresses the round-1
-follow-up: grid too thick on the accuracy chart, chart too short, hover
-fractions too verbose.
+**Context:** the pre-alloc strategy (ARD §5, superseded) forced every kernel
+to run on `ld=4096` regardless of `N`. A kernel author writing a 128×128
+tiled TC kernel for `N=128` cannot exercise the `ld == N` fast path; the
+4096 stride pollutes L2/TLB and makes benchmark numbers unrepresentative of
+a real `N=128` problem. cuBLAS itself runs on the same strided layout, so
+the comparison is apples-to-apples only because both sides are equally
+penalized. Additionally, `h2d_ns` was a single global number stamped into
+every CSV row regardless of `N` — semantically wrong.
 
-### Bug fix (functional) — done in round 1
+### Step 1 — Delete `Tracer.h`, inline its one use
 
-- [x] **2B.3.1** `scripts/server.py` `_timing_figure`: fix the
-  `customdata` index bug in both the custom and cuBLAS hovertemplates.
-  Current `customdata` layout (L90–102):
-  ```
-  [0] arch   [1] dtype   [2] class   [3] kernel_desc
-  [4] kernel_median_ns   [5] ref_kernel_median_ns
-  [6] speedup            [7] perf_pct
-  ```
-  Current hovertemplate reads `ref_median` from `[4]` (wrong — that's
-  `kernel_median_ns`) and `speedup` from `[5]` (wrong — that's
-  `ref_kernel_median_ns`). Fix to:
-  ```
-  ref_median=%{customdata[5]:,.0f} ns
-  speedup=%{customdata[6]:.3f}x
-  perf=%{customdata[7]:+.1f}% vs cuBLAS (+ = faster)
-  ```
-  Apply to both `hovertemplate` (custom) and `cublas_hovertemplate` (cuBLAS).
-  Verify in the browser: hover a custom point, confirm `ref_median` shows
-  the cuBLAS median at that N (not the kernel's own median) and `speedup`
-  shows the ratio (not the raw ns).
+- [ ] **2D.1** Delete `src/Tracer.h`.
+- [ ] **2D.2** `src/bench/Profiler.cu`: drop `#include "Tracer.h"`, drop the
+  `tracer::Timer<> sweep_timer` + two `mark()`s + the wall-time `printf`
+  block. Replace with a 3-line `std::chrono::steady_clock` start/end +
+  `printf` for sweep wall time (host orchestration context only — not
+  kernel timing; `CudaTimer` remains the only device timer).
 
-### UI polish round 1 — done
+### Step 2 — Refactor `Profiler::run_sweep` to allocate per-N
 
-- [x] **2B.3.2** `scripts/server.py`: denser + bolder grid on all three
-  figure builders (`_timing_figure`, `_accuracy_figure`,
-  `_comparison_figure`). Per-axis (x and y):
-  - `showgrid=True`, `gridwidth=2`, `gridcolor="rgba(0,0,0,0.35)"`.
-  - `ticks="outside"`, `tickwidth=2`, `ticklen=6`.
-  - For log-x (N sweep): set `tickvals` to the 14 sweep sizes
-    `[32,64,96,128,192,256,384,512,768,1024,1536,2048,3072,4096]` so
-    every data point has a tick. For linear-x, leave Plotly auto.
-  - For log-y (timing/accuracy): `dtick="D1"` (every decade) or
-    `tick0=10, dtick=10` — pick what reads best for the 10ns–10us range.
-  - `zeroline=True, zerolinewidth=2` on the Comparison tab's y-axis
-    (parity line at 0 should be visually distinct from the grid).
-  - Consider a shared `_axis_layout(log_x, log_y)` helper to avoid
-    repeating the dict across three builders.
+- [ ] **2D.3** `src/bench/Profiler.cu`: remove `constexpr int kMaxN = 4096;`
+  and the `if (N > kMaxN) skip` guard.
+- [ ] **2D.4** Move all 8 `Matrix<...>::alloc(...)` calls **inside** the
+  `for (int N : sizes)` loop, sized `N×N`. Buffers are RAII — constructed
+  and destroyed per iteration, no manual `cudaFree`.
+- [ ] **2D.5** `bench::fill_sequential<T>(hA.view(), hB.view())` per `N`
+  (filling an `N×N` host buffer directly — no strided source).
+- [ ] **2D.6** H2D A+B per `N`, timed per `N` via `CudaTimer`, reported per
+  row. The `h2d_ns` column now means "H2D cost for this `N`" — semantically
+  correct (was: global 4096² value repeated per row).
+- [ ] **2D.7** Drop all `.block(0,0,N,N)` calls — views are the full buffer;
+  `ld == N` (ColMajor default in `Matrix::alloc`).
+- [ ] **2D.8** D2H C and C_ref per `N` (already per-`N` in the inner loop;
+  drop the `.block()`).
+- [ ] **2D.9** Debug OOB snapshot → single contiguous `cudaMemcpy` of the
+  `N×N` `C_ref` buffer + `memcmp` (replaces the element-loop snapshot).
+- [ ] **2D.10** Update the `[Profiler]` startup `printf` (drop `kMaxN`
+  reference; `h2d` is now per-`N`, so the startup line no longer reports a
+  single H2D number — drop it from the startup print, it's per-row in the
+  CSV).
 
-- [x] **2B.3.3** `scripts/server.py`: higher contrast plot area vs page
-  background + larger font.
-  - Per-figure `update_layout`: `plot_bgcolor="#f0f0f0"` (light gray
-    plot area), `paper_bgcolor="#ffffff"` (white margin/page).
-    Current default is white-on-white — no visible plot boundary.
-    If `#f0f0f0` is too light, try `#e8e8e8`; the user wants clear
-    contrast with the white page.
-  - Per-figure `update_layout`: `font=dict(size=14)` (default is 12).
-    Apply to title, axis titles, tick labels, legend, hover. If 14 is
-    too large for the legend, set `font=dict(size=14)` globally and
-    `legend=dict(font=dict(size=12))` to keep the legend compact.
-  - App-level: `app.layout`'s root `html.Div` `style` — bump
-    `fontSize` from the browser default (16px) to 15–16px for sidebar
-    labels, or set explicitly via `html.Label(style={"fontSize": 14})`.
-    Current sidebar has no font-size set; it inherits the browser
-    default which varies.
+### Step 3 — Delete `Copy.h`, inline `cudaMemcpy`
 
-- [x] **2B.3.4** `scripts/server.py` `_accuracy_figure`: fix the
-  overlapping tol annotations in the top-right corner. Root cause:
-  `add_hline(..., annotation_position="top right")` is called once per
-  distinct `(run_id, tol)` — with 11 runs and 2–3 distinct tols (bf16=1e-2,
-  fp16=1e-3, tf32=1e-3), the annotations stack at the same corner.
-  Pick one approach:
-  - **(a) Deduplicate by tol value** (recommended): one `add_hline` per
-    distinct tol, combined label `tol=1e-2 (bf16) / 1e-3 (fp16, tf32)`.
-    Requires grouping runs by tol and building a combined annotation
-    string. Single annotation per tol, no stacking.
-  - **(b) Stagger positions**: rotate `annotation_position` across
-    `["top left", "top center", "top right"]` per distinct tol. Quick
-    but fragile if there are >3 distinct tols.
-  - **(c) Drop annotations, use legend**: add the tol as a legend entry
-    (invisible trace) or into the hover. Cleanest but loses the
-    at-a-glance y-value reference.
-  Implement (a) unless the user prefers otherwise. The dedup logic:
-  collect `{tol: [list of (run_id, dtype)]}` from `rows`, then for each
-  distinct tol, one `add_hline` with `annotation_text` listing the
-  dtypes that share it.
+- [ ] **2D.11** Delete `src/Copy.h` entirely.
+- [ ] **2D.12** `src/bench/Profiler.cu`: replace `copy_h2d(dst, src)` /
+  `copy_d2h(dst, src)` calls with direct `CUDA_CHECK(cudaMemcpy(...))` using
+  `cudaMemcpyHostToDevice` / `cudaMemcpyDeviceToHost`. Buffers are
+  contiguous (`ld == N`), so `cudaMemcpy` (not `cudaMemcpy2D`) is correct.
+  Direction is explicit at the call site — no `copy_kind_v` dispatch needed.
 
-### UI polish round 2 — from second user review
+### Step 4 — Trim `MatrixView.h`
 
-**Context:** round 1 (2B.3.2–2B.3.4) landed `gridwidth=2` +
-`gridcolor="rgba(0,0,0,0.35)"` uniformly across all three figures. The
-user's second review found: (a) the accuracy chart is now smushed — the
-y-range is tiny (1e-15 to ~1e-3 in log, or 0 to ~1e-2 in linear) so
-`gridwidth=2` merges into a solid block; (b) chart height is hardcoded
-at 520px and feels too short / skewed, especially the accuracy tab;
-(c) hover fractions are too verbose — `speedup=%.3f` (3 decimals),
-`perf_pct=%.1f` (1 decimal), `max_rel_err=%.3e` (3 decimals) — the user
-wants a 2-decimal ceiling across the board.
+- [ ] **2D.13** Delete `block()` (no call sites after Step 2).
+- [ ] **2D.14** Delete `is_contiguous()` (no call sites after Step 3).
+- [ ] **2D.15** Delete the `Layout` field and all `Layout::RowMajor`
+  branches in `operator()` (dead — ColMajor-only is the stated invariant
+  everywhere; `Layout.h` is being deleted in Step 6).
+- [ ] **2D.16** Rewrite the header comment: remove the "pre-allocate
+  4096×4096" paragraph and the `block()`/`is_contiguous()` documentation.
+  The dual-use contract (host utility + kernel POD descriptor) still holds
+  — just without `block`/`is_contiguous`. `operator()` is host-side
+  element access (used by `Accuracy.h::compare` and tests); the converting
+  ctor stays (const-correctness for `GemmArgs`).
 
-- [x] **2B.3.6** `scripts/server.py` `_axis_layout`: parameterize grid
-  weight per figure. Add a `grid_weight: str = "bold"` arg to
-  `_axis_layout` and `_base_layout` (values: `"bold"` / `"light"`).
-  - `"bold"` (timing, comparison): `gridwidth=2`,
-    `gridcolor="rgba(0,0,0,0.35)"`. Keep as-is — these charts have a
-    wide y-range and the bold grid reads fine.
-  - `"light"` (accuracy): `gridwidth=1`,
-    `gridcolor="rgba(0,0,0,0.15)"`. The accuracy y-range is tiny
-    (1e-15 to ~1e-3); `gridwidth=2` merges into a solid block. Lighter
-    grid keeps the chart readable.
-  - `tickwidth` follows `gridwidth` (2 for bold, 1 for light) so the
-    outside ticks match the grid weight.
-  - Pass `grid_weight="light"` from `_accuracy_figure`; default
-    `"bold"` everywhere else.
+### Step 5 — Trim `Matrix.h`
 
-- [x] **2B.3.7** `scripts/server.py`: add a chart-height control to the
-  sidebar and thread it through the callback.
-  - Sidebar: new `dcc.RadioItems(id="filter-chart-height", ...)` under
-    the Scale control. Options: `520 / 640 / 760 / 900` (label them
-    "S / M / L / XL" or just the pixel values). Default `640` (bump
-    from the current 520 — the user said the chart is too short).
-  - `_base_layout`: replace the hardcoded `"height": 520` with an
-    `height: int` parameter. Thread it through `_timing_figure`,
-    `_comparison_figure`, `_accuracy_figure`.
-  - `render_tab` callback: add `Input("filter-chart-height", "value")`
-    to the flat `@app.callback` signature (per AGENTS.md "Python /
-    Dash" — flat, not list-wrapped). Pass the value to the figure
-    builders.
-  - Run History tab is a `dt.DataTable`, not a figure — height control
-    does not apply. Leave it unchanged.
-  - This is the "dynamic layout" the user asked for — runtime control
-    over chart height without a server restart.
+- [ ] **2D.17** `Matrix::alloc`: drop the `Layout` parameter and the
+  `RowMajor` branch. `ld = rows` unconditionally (ColMajor is the only
+  layout). Drop the `layout` field and the `layout()` accessor.
+- [ ] **2D.18** Update the `Matrix` ctor signature (drop `Layout` arg) and
+  the `view()` methods (drop `layout_` from the constructed `MatrixView`).
 
-- [x] **2B.3.8** `scripts/server.py`: round hover fractions to a
-  2-decimal ceiling across all three figure builders.
-  - `_timing_figure` hovertemplate (custom + cuBLAS):
-    - `speedup=%{customdata[6]:.3f}x` → `speedup=%{customdata[6]:.2f}x`
-    - `perf=%{customdata[7]:+.1f}%` → `perf=%{customdata[7]:+.2f}%`
-    - `median` and `ref_median` stay at `:,.0f` (integer ns — no
-      fraction to round).
-  - `_comparison_figure` hovertemplate:
-    - `perf=%{y:+.1f}%` → `perf=%{y:+.2f}%`
-    - `median` / `ref_median` stay at `:,.0f`.
-  - `_accuracy_figure` hovertemplate:
-    - `max_rel_err=%{y:.3e}` → `max_rel_err=%{y:.2e}`
-  - Consistent 2-decimal ceiling across speedup, perf_pct, max_rel_err.
-    Integer ns values stay integer (no fraction to round).
+### Step 6 — Delete `Layout.h`
 
-### Validation
+- [ ] **2D.19** Delete `src/Layout.h`. After Steps 4 and 5, no code
+  references `Layout` or `Layout::ColMajor`.
 
-- [ ] **2B.3.5** Re-run the dashboard and verify all three tabs in the
-  browser:
+### Step 7 — Update `tests/test.cu`
+
+- [ ] **2D.20** Delete `test_matrixview_block` (exercises `block()`).
+- [ ] **2D.21** Delete `test_matrixview_is_contiguous` (exercises
+  `is_contiguous()`).
+- [ ] **2D.22** Delete `test_copy_roundtrip_submatrix` (exercises strided
+  `cudaMemcpy2D` path via `Copy.h`).
+- [ ] **2D.23** Delete `test_cublas_gemm_bf16_strided` (exercises `block()`
+  + strided cuBLAS).
+- [ ] **2D.24** Update `test_copy_roundtrip_full`, `test_matrix_view_from_matrix`,
+  `test_matrixview_const_conversion`, and any other test constructing
+  `MatrixView`/`Matrix` to drop the `Layout` argument.
+- [ ] **2D.25** Update `main()`'s test-call list to match the deletions.
+
+### Step 8 — Delete strided microbench variant
+
+- [ ] **2D.26** `src/bench/microbench/memcpy_microbench.cu`: delete
+  `bench_h2d_strided_2d` and `bench_d2h_strided_2d` (the strided
+  `cudaMemcpy2D` variants — no longer representative of the bench runner,
+  which now uses contiguous `cudaMemcpy` exclusively). Delete the calls in
+  `run_memcpy_microbench_main`. Keep the contiguous + async variants.
+
+### Step 9 — Update `cublas_gemm.h`
+
+- [ ] **2D.27** `src/cublas/cublas_gemm.h`: drop the `Layout::ColMajor`
+  check (the `layout` field is gone). Drop the `GEMM_Y_ASSERT` on layout
+  (no longer applicable — ColMajor is the only layout, enforced by
+  `Matrix::alloc` setting `ld = rows`).
+
+### Step 10 — Update `gemm_naive.cu` (both arches) + `gemm_bf16_k0.cu`
+
+- [ ] **2D.28** `src/sm90/gemm_naive.cu`, `src/sm120/gemm_naive.cu`,
+  `src/sm120/gemm_bf16_k0.cu`: drop the `GEMM_Y_ASSERT` on
+  `args.A.layout == Layout::ColMajor` (the `layout` field is gone). The
+  ColMajor invariant is now structural (`Matrix::alloc` sets `ld = rows`),
+  not a runtime check.
+
+### Step 11 — Update `AGENTS.md`
+
+- [ ] **2D.29** Repository Layout: drop `Tracer.h`, `Copy.h`, `Layout.h`
+  lines; update `Matrix.h`/`MatrixView.h` descriptions (no more
+  "pre-allocate 4096×4096", no more `block()`/`is_contiguous()`).
+- [ ] **2D.30** Coding Conventions → C++ / CUDA Style: drop the Tracer
+  `string_view` lifetime bullet.
+- [ ] **2D.31** Coding Conventions → CUDA-Specific: drop the Tracer
+  sentence in "Kernel timing" (CudaTimer is the only timer now). Update
+  the `MatrixView` dual-use bullet (drop `block`/`is_contiguous`, drop
+  "pre-allocate 4096×4096 buffer"). Drop the `Copy.h` "single touch-point"
+  implication if present.
+- [ ] **2D.32** Coding Conventions → CUDA-Specific: drop the `Layout`
+  mentions; ColMajor is the only layout, enforced structurally.
+
+### Step 12 — Update `ARD.md`
+
+- [ ] **2D.33** §1 (Memory model): drop `Layout` from the `MatrixView` row
+  (`{ptr, rows, cols, ld}` only). Drop the `Layout` compile-time tag
+  paragraph. Drop `block()`/`is_contiguous()` from the dual-use contract.
+  Drop the "pre-allocate 4096×4096" consequence. Drop the `copy_h2d`/
+  `copy_d2h` "single touch-point" consequence (`Copy.h` is deleted).
+- [ ] **2D.34** §2 (Memcpy variant selection): supersede with "§2
+  (revised): contiguous `cudaMemcpy` only". The strided `cudaMemcpy2D`
+  path is deleted (no strided buffers after per-`N` alloc). `Copy.h` is
+  deleted; `cudaMemcpy` is called directly from `Profiler.cu`. Strike
+  through the old decision; keep the historical context.
+- [ ] **2D.35** §5 (Bench runner): supersede with "§5 (revised): per-N
+  allocation". Document: per-`N` alloc of A/B/C/C_ref (device + host),
+  per-`N` H2D timing (reported per row), `ld == N` for every kernel
+  launch, debug OOB check via contiguous `cudaMemcpy` + `memcmp`. Strike
+  through the pre-alloc + `block()` decision; keep the historical context.
+- [ ] **2D.36** §5.1 (C_ref storage): update the OOB-mitigation paragraph
+  to reflect the contiguous `cudaMemcpy` + `memcmp` (no element loop).
+- [ ] **2D.37** §7 (Timing): drop the `Tracer` bullet; `CudaTimer` is the
+  only timer. Host sweep wall-time uses inline `std::chrono::steady_clock`
+  (3 lines in `Profiler.cu`). Strike through the `Tracer` decision.
+- [ ] **2D.38** §13 (Phase 1.5 refactor inventory): add a new row for the
+  2D refactor (per-`N` alloc, `Copy.h`/`Tracer.h`/`Layout.h` deletion,
+  `block()`/`is_contiguous()` removal). Or add a new §17 phase-summary
+  section — see Step 13.
+
+### Step 13 — ARD phase-summary section
+
+- [ ] **2D.39** Add `## 17. Phase 2D — per-N allocation + dead-code trim`
+  to `ARD.md`. Document: what changed, why (the `ld == N` motivation), what
+  was deleted (`Tracer.h`, `Copy.h`, `Layout.h`, `block()`,
+  `is_contiguous()`, strided copy path, RowMajor branches, strided
+  microbench), validation results (test count, sweep sanity).
+
+### Step 14 — Validate
+
+- [ ] **2D.40** `cmake -B build && cmake --build build -j` — clean build,
+  no warnings from the strict set.
+- [ ] **2D.41** `ctest --test-dir build` — tests pass after Step 7
+  deletions. Confirm the reduced test count matches the deletions.
+- [ ] **2D.42** `./build/gemm_y` — sweep runs end-to-end. Verify:
+  - CSV `h2d_ns` now **varies per `N`** (was a single global value).
+  - Kernels see `ld == N` (add a temporary `printf` in `gemm_naive.cu`
+    to confirm `args.A.ld == N`, then remove before commit).
+  - Sweep wall-time `printf` still appears (inline `steady_clock`).
+- [ ] **2D.43** Ingest + dashboard sanity:
   ```sh
   source pyenv/bin/activate
+  python scripts/ingest.py results/bench_sm_120_bf16.csv --label "per-N-alloc"
   python scripts/server.py
-  # → open http://localhost:8050
   ```
-  - **Timing tab**: hover a custom point — `ref_median` shows the cuBLAS
-    median (not the kernel's own), `speedup` shows the ratio (not raw ns).
-    Grid is denser + bolder; plot area is visibly distinct from the page
-    background; font is larger.
-  - **Comparison tab**: parity line at 0 is visually distinct; grid +
-    contrast + font consistent with the timing tab.
-  - **Accuracy tab**: no overlapping annotations in the top-right; each
-    distinct tol has one combined label. Grid + contrast + font
-    consistent.
-  - **Run History tab**: unchanged (table, not a figure) — verify the
-    `median % vs cuBLAS @ N=4096` column still populates.
-  - All prior behavior (log/linear toggle, sidebar filters, run
-    multi-select) still works.
-- [ ] **2B.3.9** Round-2 validation (after 2B.3.6–2B.3.8 land):
-  - **Accuracy tab**: grid is no longer a solid block — individual grid
-    lines are visible across the tiny y-range. Chart is taller (default
-    640, or whatever the user picks in the sidebar). Hover shows
-    `max_rel_err=X.YZe±NN` (2-decimal scientific).
-  - **Timing tab**: grid weight unchanged from round 1 (bold). Chart
-    height responds to the sidebar control. Hover shows
-    `speedup=X.YZx` and `perf=±X.YZ%` (2 decimals each).
-  - **Comparison tab**: same — 2-decimal `perf`, height responds to
-    sidebar.
-  - **Sidebar**: new "Chart height" control appears under Scale;
-    changing it re-renders the current tab at the new height without a
-    server restart. Run History tab is unaffected.
+  - No schema change (CSV columns unchanged). `h2d_ns` semantics shifted
+    (per-`N` now, was global) — confirm the dashboard renders without
+    errors. The Timing tab's `h2d_ns` is not plotted as a line (it's a
+    per-row context column), so no visual regression expected.
+- [ ] **2D.44** Microbench sanity:
+  ```sh
+  cmake --build build --target memcpy_microbench
+  ./build/memcpy_microbench
+  ```
+  - Contiguous + async variants still run; strided variants are gone.
 
 ---
 
@@ -254,8 +266,10 @@ with a debugging approach driven by the 2C.2 methodology.
 - `Space::HostPinned` + `Buffer<T, HostPinned>` via `cudaHostAlloc`.
 - Bench runner host buffers → pinned.
 - Async `cudaMemcpyAsync` on explicit stream (when pipelining lands).
-- Debug-build assert or `static_assert` on pinned-ness at `copy_*` call
-  sites when passing non-null stream (catches silent staging).
+  Note: after Phase 2D, `cudaMemcpy` is called directly from `Profiler.cu`
+  (no `Copy.h` wrapper). When async lands, either re-introduce a thin
+  wrapper or keep the direct calls with an explicit `cudaStream_t`
+  argument threaded through `run_sweep`.
 
 ---
 
@@ -270,3 +284,6 @@ with a debugging approach driven by the 2C.2 methodology.
 - TFLOPS metric — deferred. Needs peak-TFLOPS lookup per `(arch, dtype)`.
   Will be added in a future sub-phase after the `% perf vs cuBLAS` metric
   is in place.
+- RowMajor layout — deleted in Phase 2D. If a future phase needs it,
+  re-add a `Layout` tag + the `RowMajor` branches (5-line re-add per
+  call site; not worth carrying as dead code).

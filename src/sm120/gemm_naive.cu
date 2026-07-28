@@ -43,14 +43,8 @@ __global__ void naive_gemm_kernel(MatrixView<const T, Space::Device> A,
 
 template <typename T>
 void NaiveGemm<T>::operator()(GemmArgs<T> args, cudaStream_t /*stream*/) const {
-    // Debug-only ColMajor invariant. The kernel hardcodes ColMajor
-    // addressing; a RowMajor view would produce wrong results silently.
-    // One assert per launch (host-side), zero Release cost.
-    GEMM_Y_ASSERT(args.A.layout == Layout::ColMajor &&
-                  args.B.layout == Layout::ColMajor &&
-                  args.C.layout == Layout::ColMajor,
-                  "NaiveGemm assumes ColMajor inputs");
-    // 16x16 threads per block. Grid covers the C matrix.
+    // ColMajor is the only layout (enforced structurally by Matrix::alloc
+    // setting ld = rows); the kernel hardcodes ColMajor addressing.
     constexpr int kBlock = 16;
     const int grid_x = (args.C.rows + kBlock - 1) / kBlock;
     const int grid_y = (args.C.cols + kBlock - 1) / kBlock;

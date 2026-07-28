@@ -38,12 +38,8 @@ __global__ void naive_gemm_kernel(MatrixView<const T, Space::Device> A,
 
 template <typename T>
 void NaiveGemm<T>::operator()(GemmArgs<T> args, cudaStream_t /*stream*/) const {
-    // Debug-only ColMajor invariant. See sm120 variant for rationale;
-    // duplicated here per AGENTS.md §8 (separate .cu files, no #ifdef).
-    GEMM_Y_ASSERT(args.A.layout == Layout::ColMajor &&
-                  args.B.layout == Layout::ColMajor &&
-                  args.C.layout == Layout::ColMajor,
-                  "NaiveGemm assumes ColMajor inputs");
+    // ColMajor is the only layout (enforced structurally by Matrix::alloc
+    // setting ld = rows); the kernel hardcodes ColMajor addressing.
     constexpr int kBlock = 16;
     const int grid_x = (args.C.rows + kBlock - 1) / kBlock;
     const int grid_y = (args.C.cols + kBlock - 1) / kBlock;

@@ -4,6 +4,12 @@
 // sweep logic is arch-agnostic; only the kernels it dispatches to differ.
 // run_sweep returns SweepResult (decoupled from CSV I/O); cuBLAS is
 // measured once per N and reused as ref_* for all kernels.
+//
+// Per-N allocation (ARD §5 revised): A/B/C/C_ref (device + host) are
+// allocated N×N inside the per-N loop. ld == N for every kernel launch
+// (was ld == 4096 under the pre-alloc strategy). H2D A+B is timed per N
+// and reported in the h2d_ns column for every row at that N. cudaMemcpy
+// is called directly (no Copy.h wrapper); buffers are contiguous.
 
 #include "Profiler.h"
 
@@ -15,20 +21,18 @@
 
 #include "Arch.h"
 #include "Accuracy.h"
-#include "Copy.h"
+#include "CudaCheck.h"
 #include "CudaTimer.h"
 #include "Fill.h"
 #include "Matrix.h"
 #include "MatrixView.h"
 #include "Stats.h"
-#include "Tracer.h"
 #include "dtypes.h"
 
 namespace gemm_y {
 
 namespace {
 
-constexpr int kMaxN = 4096;
 constexpr int kWarmup = 20;
 constexpr int kTimed = 50;
 
@@ -38,49 +42,41 @@ template <typename T>
 SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
     SweepResult result;
 
-    // Pre-allocate 4096x4096 device buffers: A, B, C_max, C_ref_max.
-    // Four separate cudaMalloc allocations (CUDA guarantees disjoint
-    // address ranges — no aliasing risk; see ARD.md §5).
-    Matrix<T, Space::Device> A_max = Matrix<T, Space::Device>::alloc(kMaxN, kMaxN);
-    Matrix<T, Space::Device> B_max = Matrix<T, Space::Device>::alloc(kMaxN, kMaxN);
-    Matrix<T, Space::Device> C_max = Matrix<T, Space::Device>::alloc(kMaxN, kMaxN);
-    Matrix<T, Space::Device> C_ref_max = Matrix<T, Space::Device>::alloc(kMaxN, kMaxN);
+    std::printf("[Profiler] arch=%s dtype=%s kernels=%zu sizes=%zu  "
+                "h2d=per-N (in CSV)\n",
+                kArchName, dtypes::name<T>().data(), kernels_.size(), sizes.size());
 
-    // Host buffers for H2D source + D2H sink (full 4096x4096).
-    Matrix<T, Space::Host> hA_max = Matrix<T, Space::Host>::alloc(kMaxN, kMaxN);
-    Matrix<T, Space::Host> hB_max = Matrix<T, Space::Host>::alloc(kMaxN, kMaxN);
-    Matrix<T, Space::Host> hC_max = Matrix<T, Space::Host>::alloc(kMaxN, kMaxN);
-    Matrix<T, Space::Host> hC_ref_max = Matrix<T, Space::Host>::alloc(kMaxN, kMaxN);
-
-    // Fill host A, B once with the deterministic pattern.
-    bench::fill_sequential<T>(hA_max.view(), hB_max.view());
-
-    // H2D A, B once (timed; reported in every CSV row).
-    CudaTimer h2d_timer;
-    h2d_timer.start();
-    copy_h2d(A_max.view(), hA_max.view());
-    copy_h2d(B_max.view(), hB_max.view());
-    h2d_timer.stop();
-    const double h2d_total_ns = static_cast<double>(h2d_timer.elapsed_ms()) * 1e6;
-
-    std::printf("[Profiler] arch=%s dtype=%s kernels=%zu sizes=%zu  h2d(A+B)=%.2f ms\n",
-                kArchName, dtypes::name<T>().data(), kernels_.size(), sizes.size(),
-                h2d_total_ns / 1e6);
-
-    tracer::Timer<> sweep_timer;
-    (void)sweep_timer.mark("sweep_start");
+    const auto sweep_start = std::chrono::steady_clock::now();
 
     for (int N : sizes) {
-        if (N > kMaxN) {
-            std::fprintf(stderr, "Profiler: N=%d exceeds kMaxN=%d; skipping\n", N, kMaxN);
-            continue;
-        }
+        // Per-N allocation: A, B, C, C_ref on device + host. RAII —
+        // constructed and destroyed per iteration, no manual cudaFree.
+        // ld == N (ColMajor default in Matrix::alloc).
+        Matrix<T, Space::Device> dA = Matrix<T, Space::Device>::alloc(N, N);
+        Matrix<T, Space::Device> dB = Matrix<T, Space::Device>::alloc(N, N);
+        Matrix<T, Space::Device> dC = Matrix<T, Space::Device>::alloc(N, N);
+        Matrix<T, Space::Device> dC_ref = Matrix<T, Space::Device>::alloc(N, N);
 
-        // Sub-views (ld = kMaxN, strided for N < kMaxN).
-        auto dA = A_max.view().block(0, 0, N, N);
-        auto dB = B_max.view().block(0, 0, N, N);
-        auto dC = C_max.view().block(0, 0, N, N);
-        auto dC_ref = C_ref_max.view().block(0, 0, N, N);
+        Matrix<T, Space::Host> hA = Matrix<T, Space::Host>::alloc(N, N);
+        Matrix<T, Space::Host> hB = Matrix<T, Space::Host>::alloc(N, N);
+        Matrix<T, Space::Host> hC = Matrix<T, Space::Host>::alloc(N, N);
+        Matrix<T, Space::Host> hC_ref = Matrix<T, Space::Host>::alloc(N, N);
+
+        // Fill host A, B with the deterministic pattern (N×N directly).
+        bench::fill_sequential<T>(hA.view(), hB.view());
+
+        // H2D A+B (timed per N; reported in every CSV row at this N).
+        CudaTimer h2d_timer;
+        h2d_timer.start();
+        CUDA_CHECK(cudaMemcpy(dA.data(), hA.data(), hA.bytes(), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(dB.data(), hB.data(), hB.bytes(), cudaMemcpyHostToDevice));
+        h2d_timer.stop();
+        const double h2d_ns = static_cast<double>(h2d_timer.elapsed_ms()) * 1e6;
+
+        auto dA_v = dA.view();
+        auto dB_v = dB.view();
+        auto dC_v = dC.view();
+        auto dC_ref_v = dC_ref.view();
 
         // 1) cuBLAS reference -> dC_ref. Warmup + timed. Measured ONCE per N;
         //    its kernel_min_ns / kernel_median_ns are reused as ref_* for every
@@ -89,13 +85,13 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
         double ref_d2h_ns = 0.0;
         {
             for (int i = 0; i < kWarmup; ++i) {
-                cublas_gemm(cublas_, dA, dB, dC_ref);
+                cublas_gemm(cublas_, dA_v, dB_v, dC_ref_v);
             }
             std::vector<float> ms; ms.reserve(kTimed);
             CudaTimer t;
             for (int i = 0; i < kTimed; ++i) {
                 t.start();
-                cublas_gemm(cublas_, dA, dB, dC_ref);
+                cublas_gemm(cublas_, dA_v, dB_v, dC_ref_v);
                 t.stop();
                 ms.push_back(t.elapsed_ms());
             }
@@ -104,7 +100,8 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
             // D2H C_ref once (timed).
             CudaTimer d2h_t;
             d2h_t.start();
-            copy_d2h(hC_ref_max.view().block(0, 0, N, N), dC_ref);
+            CUDA_CHECK(cudaMemcpy(hC_ref.data(), dC_ref.data(), dC_ref.bytes(),
+                                  cudaMemcpyDeviceToHost));
             d2h_t.stop();
             ref_d2h_ns = static_cast<double>(d2h_t.elapsed_ms()) * 1e6;
         }
@@ -118,7 +115,7 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
             row.N = N;
             row.kernel_name = "cublas";
             row.kernel_desc = "cublasGemmEx reference (fp32 accum)";
-            row.h2d_ns = h2d_total_ns;
+            row.h2d_ns = h2d_ns;
             row.kernel_min_ns = ref_stats.min_ns;
             row.kernel_median_ns = ref_stats.median_ns;
             row.d2h_ns = ref_d2h_ns;
@@ -131,23 +128,18 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
 
         // 2) Per registered kernel: warmup + timed + accuracy vs C_ref.
         for (const auto& k : kernels_) {
-            GemmArgs<T> args{dA, dB, dC};
+            GemmArgs<T> args{dA_v, dB_v, dC_v};
 
-            // Debug-build OOB check: snapshot C_ref's N x N block on the
-            // host before the custom kernel runs; verify unchanged after.
-            // Catches out-of-bounds writes that would otherwise silently
-            // corrupt the reference (see ARD.md §5.1).
+            // Debug-build OOB check: snapshot C_ref's N×N buffer on the host
+            // before the custom kernel runs; verify unchanged after. Catches
+            // out-of-bounds writes that would otherwise silently corrupt the
+            // reference (see ARD.md §5.1). Contiguous cudaMemcpy + memcmp.
             std::vector<T> cref_snapshot;
         #ifndef NDEBUG
             {
                 cref_snapshot.assign(static_cast<std::size_t>(N) * static_cast<std::size_t>(N), T{0});
-                for (int j = 0; j < N; ++j) {
-                    for (int i = 0; i < N; ++i) {
-                        cref_snapshot[static_cast<std::size_t>(i) +
-                                      static_cast<std::size_t>(j) * static_cast<std::size_t>(N)] =
-                            hC_ref_max.view()(i, j);
-                    }
-                }
+                CUDA_CHECK(cudaMemcpy(cref_snapshot.data(), dC_ref.data(),
+                                      dC_ref.bytes(), cudaMemcpyDeviceToHost));
             }
         #endif
 
@@ -172,31 +164,24 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
             // D2H C once (timed).
             CudaTimer d2h_t;
             d2h_t.start();
-            copy_d2h(hC_max.view().block(0, 0, N, N), dC);
+            CUDA_CHECK(cudaMemcpy(hC.data(), dC.data(), dC.bytes(),
+                                  cudaMemcpyDeviceToHost));
             d2h_t.stop();
             const double d2h_ns = static_cast<double>(d2h_t.elapsed_ms()) * 1e6;
 
             // Accuracy vs C_ref (host-side, fp64).
-            auto hgot = hC_max.view().block(0, 0, N, N);
-            auto href = hC_ref_max.view().block(0, 0, N, N);
-            const ErrReport<T> err = compare<T>(hgot, href);
+            const ErrReport<T> err = compare<T>(hC.view(), hC_ref.view());
 
         #ifndef NDEBUG
             {
                 // Verify C_ref on device wasn't corrupted by the custom kernel.
                 std::vector<T> now(static_cast<std::size_t>(N) * static_cast<std::size_t>(N), T{0});
-                copy_d2h(hC_ref_max.view().block(0, 0, N, N), dC_ref);
-                for (int j = 0; j < N; ++j) {
-                    for (int i = 0; i < N; ++i) {
-                        now[static_cast<std::size_t>(i) +
-                            static_cast<std::size_t>(j) * static_cast<std::size_t>(N)] =
-                            hC_ref_max.view()(i, j);
-                    }
-                }
+                CUDA_CHECK(cudaMemcpy(now.data(), dC_ref.data(), dC_ref.bytes(),
+                                      cudaMemcpyDeviceToHost));
                 if (std::memcmp(now.data(), cref_snapshot.data(),
                                 now.size() * sizeof(T)) != 0) {
                     std::fprintf(stderr,
-                                 "[OOB] kernel '%s' (N=%d) corrupted C_ref_max!\n",
+                                 "[OOB] kernel '%s' (N=%d) corrupted C_ref!\n",
                                  k.name.c_str(), N);
                     std::abort();
                 }
@@ -224,7 +209,7 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
                 row.N = N;
                 row.kernel_name = k.name;
                 row.kernel_desc = k.description;
-                row.h2d_ns = h2d_total_ns;
+                row.h2d_ns = h2d_ns;
                 row.kernel_min_ns = s.min_ns;
                 row.kernel_median_ns = s.median_ns;
                 row.d2h_ns = d2h_ns;
@@ -243,15 +228,12 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int>& sizes) {
         }
     }
 
-    (void)sweep_timer.mark("sweep_end");
-    // Print total sweep wall time (host-side steady_clock; includes launch
+    // Total sweep wall time (host-side steady_clock; includes launch
     // overhead — for orchestration context only, not kernel timing).
-    // Indices: [0]=origin (ctor), [1]=sweep_start, [2]=sweep_end.
-    {
-        const auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(
-            sweep_timer[2].timestamp - sweep_timer[1].timestamp);
-        std::printf("[Profiler] sweep wall time: %ld ms\n", static_cast<long>(dt.count()));
-    }
+    const auto sweep_end = std::chrono::steady_clock::now();
+    const auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(
+        sweep_end - sweep_start);
+    std::printf("[Profiler] sweep wall time: %ld ms\n", static_cast<long>(dt.count()));
 
     return result;
 }

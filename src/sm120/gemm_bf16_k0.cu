@@ -41,11 +41,8 @@ __global__ void k0_gemm_kernel(MatrixView<const __nv_bfloat16, Space::Device> A,
 
 void k0::operator()(GemmArgs<__nv_bfloat16> args,
                     cudaStream_t /*stream*/) const {
-    // Debug-only ColMajor invariant (mirrors NaiveGemm).
-    GEMM_Y_ASSERT(args.A.layout == Layout::ColMajor &&
-                  args.B.layout == Layout::ColMajor &&
-                  args.C.layout == Layout::ColMajor,
-                  "k0 assumes ColMajor inputs");
+    // ColMajor is the only layout (enforced structurally by Matrix::alloc
+    // setting ld = rows); the kernel hardcodes ColMajor addressing.
     constexpr int kBlock = 16;
     const int grid_x = (args.C.rows + kBlock - 1) / kBlock;
     const int grid_y = (args.C.cols + kBlock - 1) / kBlock;

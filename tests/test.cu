@@ -1,5 +1,5 @@
 // tests/test.cu — unit tests for Buffer / MatrixView / Matrix / CudaTimer /
-// CublasHandle / cublas_gemm / Copy / NaiveGemm / Profiler.
+// CublasHandle / cublas_gemm / NaiveGemm / Profiler.
 //
 // No external test framework (AGENTS.md spirit: no external deps). A tiny
 // hand-rolled assert macro prints failures and counts them. Returns nonzero
@@ -14,7 +14,6 @@
 #include "Arch.h"
 #include "bench/Accuracy.h"
 #include "Buffer.h"
-#include "Copy.h"
 #include "CudaCheck.h"
 #include "CudaTimer.h"
 #include "Matrix.h"
@@ -84,37 +83,6 @@ void test_buffer_device() {
 // ---------------------------------------------------------------------------
 // MatrixView tests
 // ---------------------------------------------------------------------------
-void test_matrixview_block() {
-    gemm_y::Buffer<float, gemm_y::Space::Host> b(64);
-    for (int i = 0; i < 64; ++i) b.data()[i] = static_cast<float>(i);
-    gemm_y::MatrixView<float, gemm_y::Space::Host> v(b.data(), 8, 8, 8);
-    CHECK(v.rows == 8);
-    CHECK(v.cols == 8);
-    CHECK(v.ld == 8);
-    CHECK(v.is_contiguous());
-
-    auto sub = v.block(2, 3, 3, 4);
-    CHECK(sub.rows == 3);
-    CHECK(sub.cols == 4);
-    CHECK(sub.ld == 8);
-    CHECK(!sub.is_contiguous());
-    CHECK(sub.ptr == v.ptr + 2 + 3 * 8);
-    CHECK_APPROX_EQ(sub(0, 0), 26.0f, 1e-9);
-    CHECK_APPROX_EQ(sub(1, 2), 43.0f, 1e-9);
-}
-
-void test_matrixview_is_contiguous() {
-    gemm_y::Buffer<float, gemm_y::Space::Host> b(64);
-    gemm_y::MatrixView<float, gemm_y::Space::Host> full(b.data(), 8, 8, 8);
-    CHECK(full.is_contiguous());
-
-    auto sub = full.block(0, 0, 4, 4);
-    CHECK(!sub.is_contiguous());
-
-    gemm_y::MatrixView<float, gemm_y::Space::Host> c(b.data(), 4, 4, 4);
-    CHECK(c.is_contiguous());
-}
-
 // R8: T -> const T compiles. The reverse (const T -> T) is a compile error
 // by design (the SFINAE constraint in the converting constructor). We
 // document this via a comment — uncommenting the reverse line should fail
@@ -152,7 +120,7 @@ void test_matrix_view_from_matrix() {
 }
 
 // ---------------------------------------------------------------------------
-// Copy tests (round-trip preserves data, full + submatrix)
+// Copy tests (round-trip preserves data, contiguous cudaMemcpy)
 // ---------------------------------------------------------------------------
 void test_copy_roundtrip_full() {
     gemm_y::Matrix<float, gemm_y::Space::Host> h =
@@ -166,76 +134,12 @@ void test_copy_roundtrip_full() {
     gemm_y::Matrix<float, gemm_y::Space::Host> h2 =
         gemm_y::Matrix<float, gemm_y::Space::Host>::alloc(16, 16);
 
-    gemm_y::copy_h2d(d.view(), h.view());
-    gemm_y::copy_d2h(h2.view(), d.view());
+    CUDA_CHECK(cudaMemcpy(d.data(), h.data(), h.bytes(), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(h2.data(), d.data(), d.bytes(), cudaMemcpyDeviceToHost));
 
     for (int j = 0; j < 16; ++j)
         for (int i = 0; i < 16; ++i)
             CHECK_APPROX_EQ(h2.view()(i, j), h.view()(i, j), 1e-9);
-}
-
-void test_copy_roundtrip_submatrix() {
-    constexpr int N = 64;
-    constexpr int S = 16;
-    gemm_y::Matrix<float, gemm_y::Space::Host> hsrc =
-        gemm_y::Matrix<float, gemm_y::Space::Host>::alloc(N, N);
-    for (int j = 0; j < N; ++j)
-        for (int i = 0; i < N; ++i)
-            hsrc.view()(i, j) = static_cast<float>(i * N + j);
-
-    gemm_y::Matrix<float, gemm_y::Space::Device> dsrc =
-        gemm_y::Matrix<float, gemm_y::Space::Device>::alloc(N, N);
-    gemm_y::copy_h2d(dsrc.view(), hsrc.view());
-
-    auto dsub = dsrc.view().block(4, 5, S, S);
-
-    // D2H the strided device submatrix into a contiguous host buffer.
-    gemm_y::Matrix<float, gemm_y::Space::Host> hsub =
-        gemm_y::Matrix<float, gemm_y::Space::Host>::alloc(S, S);
-    gemm_y::copy_d2h(hsub.view(), dsub);
-
-    for (int j = 0; j < S; ++j)
-        for (int i = 0; i < S; ++i)
-            CHECK_APPROX_EQ(hsub.view()(i, j),
-                            hsrc.view()(4 + i, 5 + j), 1e-9);
-
-    // H2D the contiguous host buffer into a contiguous device buffer, then
-    // D2H back, verify round-trip.
-    gemm_y::Matrix<float, gemm_y::Space::Device> ddst =
-        gemm_y::Matrix<float, gemm_y::Space::Device>::alloc(S, S);
-    gemm_y::copy_h2d(ddst.view(), hsub.view());
-    gemm_y::Matrix<float, gemm_y::Space::Host> hsub2 =
-        gemm_y::Matrix<float, gemm_y::Space::Host>::alloc(S, S);
-    gemm_y::copy_d2h(hsub2.view(), ddst.view());
-    for (int j = 0; j < S; ++j)
-        for (int i = 0; i < S; ++i)
-            CHECK_APPROX_EQ(hsub2.view()(i, j), hsub.view()(i, j), 1e-9);
-}
-
-// ---------------------------------------------------------------------------
-// Compile-time guarantees for detail::copy_kind_v
-// ---------------------------------------------------------------------------
-// Wrong-direction instantiations (Host->Host, Device->Device) are rejected
-// by the static_assert inside detail::copy; the poison primary template
-// of copy_kind_v is the defensive secondary net. These static_asserts pin
-// the valid specializations so a future refactor that flips the mapping
-// fails to compile here.
-void test_copy_kind_compile_time() {
-    using gemm_y::Space;
-    using gemm_y::detail::copy_kind_v;
-
-    static_assert(copy_kind_v<Space::Device, Space::Host> == cudaMemcpyHostToDevice,
-                  "H2D must map to cudaMemcpyHostToDevice");
-    static_assert(copy_kind_v<Space::Host, Space::Device> == cudaMemcpyDeviceToHost,
-                  "D2H must map to cudaMemcpyDeviceToHost");
-
-    // Sanity: the kind enum values are distinct, so the table is not
-    // accidentally uniform.
-    static_assert(copy_kind_v<Space::Device, Space::Host> !=
-                  copy_kind_v<Space::Host, Space::Device>,
-                  "H2D and D2H kinds must differ");
-
-    ++g_checks;  // count the test as one exercised check
 }
 
 // ---------------------------------------------------------------------------
@@ -296,13 +200,13 @@ void test_cublas_gemm_bf16() {
     gemm_y::Matrix<gemm_y::dtypes::bf16, gemm_y::Space::Device> dC =
         gemm_y::Matrix<gemm_y::dtypes::bf16, gemm_y::Space::Device>::alloc(N, N);
 
-    gemm_y::copy_h2d(dA.view(), hA.view());
-    gemm_y::copy_h2d(dB.view(), hB.view());
+    CUDA_CHECK(cudaMemcpy(dA.data(), hA.data(), hA.bytes(), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dB.data(), hB.data(), hB.bytes(), cudaMemcpyHostToDevice));
 
     gemm_y::CublasHandle handle;
     gemm_y::cublas_gemm(handle, dA.view(), dB.view(), dC.view());
 
-    gemm_y::copy_d2h(hC.view(), dC.view());
+    CUDA_CHECK(cudaMemcpy(hC.data(), dC.data(), dC.bytes(), cudaMemcpyDeviceToHost));
 
     double max_abs = 0.0, max_rel = 0.0;
     for (int j = 0; j < N; ++j) {
@@ -318,73 +222,6 @@ void test_cublas_gemm_bf16() {
         }
     }
     std::printf("[test_cublas_gemm_bf16] max_abs=%.3e max_rel=%.3e\n", max_abs, max_rel);
-    CHECK(max_rel <= 1e-3);
-}
-
-// R8: cuBLAS on a strided submatrix (N=32 of 64x64, ld=64). Catches the
-// bench runner's exact dependency — ld-aware cuBLAS calls.
-void test_cublas_gemm_bf16_strided() {
-    constexpr int N = 32;
-    constexpr int BIG = 64;
-    gemm_y::Matrix<gemm_y::dtypes::bf16, gemm_y::Space::Host> hA =
-        gemm_y::Matrix<gemm_y::dtypes::bf16, gemm_y::Space::Host>::alloc(BIG, BIG);
-    gemm_y::Matrix<gemm_y::dtypes::bf16, gemm_y::Space::Host> hB =
-        gemm_y::Matrix<gemm_y::dtypes::bf16, gemm_y::Space::Host>::alloc(BIG, BIG);
-    gemm_y::Matrix<gemm_y::dtypes::bf16, gemm_y::Space::Host> hC =
-        gemm_y::Matrix<gemm_y::dtypes::bf16, gemm_y::Space::Host>::alloc(BIG, BIG);
-
-    gemm_y::bench::fill_sequential<gemm_y::dtypes::bf16>(hA.view(), hB.view());
-
-    // Host fp32 reference for the N x N top-left block.
-    std::vector<float> ref(static_cast<std::size_t>(N) * static_cast<std::size_t>(N), 0.0f);
-    for (int j = 0; j < N; ++j) {
-        for (int i = 0; i < N; ++i) {
-            float acc = 0.0f;
-            for (int k = 0; k < N; ++k) {
-                const float a = static_cast<float>(hA.view()(i, k));
-                const float b = static_cast<float>(hB.view()(k, j));
-                acc += a * b;
-            }
-            ref[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * N] = acc;
-        }
-    }
-
-    gemm_y::Matrix<gemm_y::dtypes::bf16, gemm_y::Space::Device> dA =
-        gemm_y::Matrix<gemm_y::dtypes::bf16, gemm_y::Space::Device>::alloc(BIG, BIG);
-    gemm_y::Matrix<gemm_y::dtypes::bf16, gemm_y::Space::Device> dB =
-        gemm_y::Matrix<gemm_y::dtypes::bf16, gemm_y::Space::Device>::alloc(BIG, BIG);
-    gemm_y::Matrix<gemm_y::dtypes::bf16, gemm_y::Space::Device> dC =
-        gemm_y::Matrix<gemm_y::dtypes::bf16, gemm_y::Space::Device>::alloc(BIG, BIG);
-
-    gemm_y::copy_h2d(dA.view(), hA.view());
-    gemm_y::copy_h2d(dB.view(), hB.view());
-
-    // Strided sub-views: N x N with ld = BIG.
-    auto dA_sub = dA.view().block(0, 0, N, N);
-    auto dB_sub = dB.view().block(0, 0, N, N);
-    auto dC_sub = dC.view().block(0, 0, N, N);
-
-    gemm_y::CublasHandle handle;
-    gemm_y::cublas_gemm(handle, dA_sub, dB_sub, dC_sub);
-
-    // D2H the strided C submatrix into a contiguous host buffer.
-    gemm_y::Matrix<gemm_y::dtypes::bf16, gemm_y::Space::Host> hC_sub =
-        gemm_y::Matrix<gemm_y::dtypes::bf16, gemm_y::Space::Host>::alloc(N, N);
-    gemm_y::copy_d2h(hC_sub.view(), dC_sub);
-
-    double max_rel = 0.0;
-    for (int j = 0; j < N; ++j) {
-        for (int i = 0; i < N; ++i) {
-            const double g = static_cast<double>(hC_sub.view()(i, j));
-            const double r = static_cast<double>(
-                ref[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * N]);
-            const double abs_err = std::fabs(g - r);
-            const double denom = std::fmax(std::fabs(r), 1e-9);
-            const double rel_err = abs_err / denom;
-            if (rel_err > max_rel) max_rel = rel_err;
-        }
-    }
-    std::printf("[test_cublas_gemm_bf16_strided] max_rel=%.3e\n", max_rel);
     CHECK(max_rel <= 1e-3);
 }
 
@@ -421,14 +258,14 @@ void test_naive_gemm_bf16() {
     gemm_y::Matrix<gemm_y::dtypes::bf16, gemm_y::Space::Device> dC =
         gemm_y::Matrix<gemm_y::dtypes::bf16, gemm_y::Space::Device>::alloc(N, N);
 
-    gemm_y::copy_h2d(dA.view(), hA.view());
-    gemm_y::copy_h2d(dB.view(), hB.view());
+    CUDA_CHECK(cudaMemcpy(dA.data(), hA.data(), hA.bytes(), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dB.data(), hB.data(), hB.bytes(), cudaMemcpyHostToDevice));
 
     gemm_y::NaiveGemm<gemm_y::dtypes::bf16> kernel;
     kernel(gemm_y::GemmArgs<gemm_y::dtypes::bf16>{dA.view(), dB.view(), dC.view()}, nullptr);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    gemm_y::copy_d2h(hC.view(), dC.view());
+    CUDA_CHECK(cudaMemcpy(hC.data(), dC.data(), dC.bytes(), cudaMemcpyDeviceToHost));
 
     double max_rel = 0.0;
     for (int j = 0; j < N; ++j) {
@@ -475,13 +312,13 @@ void test_cublas_gemm_fp16() {
     gemm_y::Matrix<T, gemm_y::Space::Device> dB = gemm_y::Matrix<T, gemm_y::Space::Device>::alloc(N, N);
     gemm_y::Matrix<T, gemm_y::Space::Device> dC = gemm_y::Matrix<T, gemm_y::Space::Device>::alloc(N, N);
 
-    gemm_y::copy_h2d(dA.view(), hA.view());
-    gemm_y::copy_h2d(dB.view(), hB.view());
+    CUDA_CHECK(cudaMemcpy(dA.data(), hA.data(), hA.bytes(), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dB.data(), hB.data(), hB.bytes(), cudaMemcpyHostToDevice));
 
     gemm_y::CublasHandle handle;
     gemm_y::cublas_gemm(handle, dA.view(), dB.view(), dC.view());
 
-    gemm_y::copy_d2h(hC.view(), dC.view());
+    CUDA_CHECK(cudaMemcpy(hC.data(), dC.data(), dC.bytes(), cudaMemcpyDeviceToHost));
 
     double max_abs = 0.0, max_rel = 0.0;
     for (int j = 0; j < N; ++j) {
@@ -530,8 +367,8 @@ void test_cublas_gemm_tfloat() {
     gemm_y::Matrix<T, gemm_y::Space::Device> dB = gemm_y::Matrix<T, gemm_y::Space::Device>::alloc(N, N);
     gemm_y::Matrix<T, gemm_y::Space::Device> dC = gemm_y::Matrix<T, gemm_y::Space::Device>::alloc(N, N);
 
-    gemm_y::copy_h2d(dA.view(), hA.view());
-    gemm_y::copy_h2d(dB.view(), hB.view());
+    CUDA_CHECK(cudaMemcpy(dA.data(), hA.data(), hA.bytes(), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dB.data(), hB.data(), hB.bytes(), cudaMemcpyHostToDevice));
 
     gemm_y::CublasHandle handle;
 
@@ -544,7 +381,7 @@ void test_cublas_gemm_tfloat() {
     CHECK(mode_after == mode_before);
     CHECK(mode_after == CUBLAS_DEFAULT_MATH);
 
-    gemm_y::copy_d2h(hC.view(), dC.view());
+    CUDA_CHECK(cudaMemcpy(hC.data(), dC.data(), dC.bytes(), cudaMemcpyDeviceToHost));
 
     double max_abs = 0.0, max_rel = 0.0;
     for (int j = 0; j < N; ++j) {
@@ -600,17 +437,12 @@ int main() {
 
     test_buffer_host();
     test_buffer_device();
-    test_matrixview_block();
-    test_matrixview_is_contiguous();
     test_matrixview_const_conversion();
     test_matrix_view_from_matrix();
     test_copy_roundtrip_full();
-    test_copy_roundtrip_submatrix();
-    test_copy_kind_compile_time();
     test_cuda_timer();
     test_cublas_handle();
     test_cublas_gemm_bf16();
-    test_cublas_gemm_bf16_strided();
     test_cublas_gemm_fp16();
     test_cublas_gemm_tfloat();
     test_naive_gemm_bf16();

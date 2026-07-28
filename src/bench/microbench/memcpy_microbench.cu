@@ -5,11 +5,12 @@
 // Variants per direction:
 //   - cudaMemcpy       (sync, contiguous)
 //   - cudaMemcpyAsync  (default stream + sync)
-//   - cudaMemcpy2D     (strided: 4096x4096 buffer, N x N submatrix, ld=4096)
 //
-// Hypothesis: sync vs async identical (no overlap); cudaMemcpy2D is the
-// only correct option for strided submatrix copies. Decision recorded in
-// ARD.md §2. Prints a human-readable aligned table instead of raw CSV.
+// Hypothesis: sync vs async identical (no overlap on the default stream).
+// Decision recorded in ARD.md §2. Prints a human-readable aligned table
+// instead of raw CSV. The strided_2d (cudaMemcpy2D) variants were deleted
+// in Phase 2D — the bench runner uses contiguous cudaMemcpy exclusively
+// (per-N allocation, ld == N).
 
 #include <string>
 #include <vector>
@@ -26,7 +27,6 @@
 namespace gemm_y {
 namespace {
 
-constexpr int kMaxN = 4096;
 constexpr int kWarmup = 20;
 constexpr int kTimed = 50;
 
@@ -83,33 +83,6 @@ void bench_h2d_async(int N, bench::Table& t) {
     t.add_row({"h2d", "async_default_stream", i(N), ns(s.min_ns), ns(s.median_ns)});
 }
 
-void bench_h2d_strided_2d(int N, bench::Table& t) {
-    Matrix<float, Space::Host> h = Matrix<float, Space::Host>::alloc(kMaxN, kMaxN);
-    Matrix<float, Space::Device> d = Matrix<float, Space::Device>::alloc(kMaxN, kMaxN);
-    auto hsub = h.view().block(0, 0, N, N);
-    auto dsub = d.view().block(0, 0, N, N);
-    const std::size_t width = static_cast<std::size_t>(N) * sizeof(float);
-    const std::size_t spitch = static_cast<std::size_t>(kMaxN) * sizeof(float);
-    const std::size_t dpitch = spitch;
-    std::vector<float> ms; ms.reserve(kTimed);
-    CudaTimer t_;
-    for (int i = 0; i < kWarmup; ++i) {
-        CUDA_CHECK(cudaMemcpy2D(dsub.ptr, dpitch, hsub.ptr, spitch,
-                               width, static_cast<std::size_t>(N),
-                               cudaMemcpyHostToDevice));
-    }
-    for (int i = 0; i < kTimed; ++i) {
-        t_.start();
-        CUDA_CHECK(cudaMemcpy2D(dsub.ptr, dpitch, hsub.ptr, spitch,
-                               width, static_cast<std::size_t>(N),
-                               cudaMemcpyHostToDevice));
-        t_.stop();
-        ms.push_back(t_.elapsed_ms());
-    }
-    const bench::TimedStats s = bench::summarize_ns(ms);
-    t.add_row({"h2d", "strided_2d", i(N), ns(s.min_ns), ns(s.median_ns)});
-}
-
 void bench_d2h_contiguous_sync(int N, bench::Table& t) {
     Matrix<float, Space::Host> h = Matrix<float, Space::Host>::alloc(N, N);
     Matrix<float, Space::Device> d = Matrix<float, Space::Device>::alloc(N, N);
@@ -150,33 +123,6 @@ void bench_d2h_async(int N, bench::Table& t) {
     t.add_row({"d2h", "async_default_stream", i(N), ns(s.min_ns), ns(s.median_ns)});
 }
 
-void bench_d2h_strided_2d(int N, bench::Table& t) {
-    Matrix<float, Space::Host> h = Matrix<float, Space::Host>::alloc(kMaxN, kMaxN);
-    Matrix<float, Space::Device> d = Matrix<float, Space::Device>::alloc(kMaxN, kMaxN);
-    auto hsub = h.view().block(0, 0, N, N);
-    auto dsub = d.view().block(0, 0, N, N);
-    const std::size_t width = static_cast<std::size_t>(N) * sizeof(float);
-    const std::size_t spitch = static_cast<std::size_t>(kMaxN) * sizeof(float);
-    const std::size_t dpitch = spitch;
-    std::vector<float> ms; ms.reserve(kTimed);
-    CudaTimer t_;
-    for (int i = 0; i < kWarmup; ++i) {
-        CUDA_CHECK(cudaMemcpy2D(hsub.ptr, dpitch, dsub.ptr, spitch,
-                               width, static_cast<std::size_t>(N),
-                               cudaMemcpyDeviceToHost));
-    }
-    for (int i = 0; i < kTimed; ++i) {
-        t_.start();
-        CUDA_CHECK(cudaMemcpy2D(hsub.ptr, dpitch, dsub.ptr, spitch,
-                               width, static_cast<std::size_t>(N),
-                               cudaMemcpyDeviceToHost));
-        t_.stop();
-        ms.push_back(t_.elapsed_ms());
-    }
-    const bench::TimedStats s = bench::summarize_ns(ms);
-    t.add_row({"d2h", "strided_2d", i(N), ns(s.min_ns), ns(s.median_ns)});
-}
-
 } // namespace
 
 int run_memcpy_microbench_main() {
@@ -185,10 +131,8 @@ int run_memcpy_microbench_main() {
     for (int N : sizes) {
         bench_h2d_contiguous_sync(N, t);
         bench_h2d_async(N, t);
-        bench_h2d_strided_2d(N, t);
         bench_d2h_contiguous_sync(N, t);
         bench_d2h_async(N, t);
-        bench_d2h_strided_2d(N, t);
     }
     t.print();
     return 0;

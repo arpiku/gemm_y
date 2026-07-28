@@ -1,8 +1,8 @@
 // Profiler.h — type-erased kernel registry + sweep runner.
 //
 // One Profiler<T> instance per dtype. cuBLAS is the implicit reference: run
-// first per N, cached on device (C_ref_max), and used as the accuracy ground
-// truth. Custom kernels write to a separate C_max buffer (see ARD.md §4, §5).
+// first per N, cached on device (C_ref), and used as the accuracy ground
+// truth. Custom kernels write to a separate C buffer (see ARD.md §4, §5).
 //
 // register_kernel<K>() type-erases into std::function once at registration.
 // Stateless K (the common case) fits SBO; stateful K pays one heap alloc,
@@ -40,7 +40,7 @@ struct SweepRow {
     int N;
     std::string kernel_name;
     std::string kernel_desc;
-    double h2d_ns;               // global H2D time (A+B), repeated per row
+    double h2d_ns;               // per-N H2D time (A+B), reported per row at this N
     double kernel_min_ns;
     double kernel_median_ns;
     double d2h_ns;
@@ -82,11 +82,11 @@ public:
         kernels_.push_back(std::move(e));
     }
 
-    // Run the full sweep. Pre-allocates 4096x4096 device + host buffers,
-    // fills A/B with a deterministic pattern, copies A/B to device once,
-    // then per N: runs cuBLAS reference once, then each registered kernel
-    // with warmup=20 / timed=50, computes accuracy vs cuBLAS, appends a
-    // SweepRow to the result. Returns the SweepResult; does NOT write CSV.
+    // Run the full sweep. Per N: allocates N×N device + host buffers
+    // (A/B/C/C_ref), fills A/B with a deterministic pattern, copies A/B to
+    // device (timed per N), runs cuBLAS reference once, then each registered
+    // kernel with warmup=20 / timed=50, computes accuracy vs cuBLAS, appends
+    // a SweepRow to the result. Returns the SweepResult; does NOT write CSV.
     // Implementation lives in Profiler.cu (compiled per arch).
     [[nodiscard]] SweepResult run_sweep(const std::vector<int>& sizes);
 

@@ -102,12 +102,11 @@ gemm_y/
 │   └── gemm_y.db          # SQLite benchmark DB (tracked, binary)
 ├── src/
 │   ├── main.cpp           # entry point
-│   ├── Tracer.h           # host-side timer (steady_clock, C++17)
 │   ├── cuda_compat.h      # single CUDA include wrapper
 │   ├── CudaCheck.h        # CUDA_CHECK / CUBLAS_CHECK / GEMM_Y_ASSERT
 │   ├── CudaTimer.h        # RAII cudaEvent pair (device timing)
-│   ├── Space.h, Layout.h  # compile-time memory-space / layout tags
-│   ├── Buffer.h, Matrix.h, MatrixView.h, Copy.h
+│   ├── Space.h            # compile-time memory-space tag (Host / Device)
+│   ├── Buffer.h, Matrix.h, MatrixView.h
 │   ├── Arch.h, dtypes.h   # arch name + dtype aliases/names (bf16/fp16/tfloat)
 │   ├── bench/             # Profiler, GemmArgs, KernelTraits, Accuracy,
 │   │   ├── Stats.h, Fill.h, CsvWriter.h
@@ -139,8 +138,6 @@ Do not load `ARD.md` in full unless reviewing a specific decision.
 - **No exceptions across the CUDA boundary** — kernels can't throw, and host
   code calling CUDA APIs should check return codes and propagate via return
   value or `std::optional`/`expected`-like pattern.
-- **`string_view` lifetime**: when used (e.g. in `Tracer.h`), the caller
-  must outlive the consumer. Document at the call site.
 - **No `using namespace` in headers.**
 - **Header guards**: `#pragma once` (already the convention).
 - **No phase trailers in source comments**: do not carry `Phase X.Y`,
@@ -174,9 +171,11 @@ Do not load `ARD.md` in full unless reviewing a specific decision.
   reference row is always written (ground truth, err == 0).
 
 ### CUDA-Specific
-- **Kernel timing**: use `cudaEvent` for device-side timing, **not** the host
-  `Tracer` (which uses `steady_clock` and measures wall time including
-  launch overhead). `Tracer` is for host-side orchestration only.
+- **Kernel timing**: use `cudaEvent` for device-side timing via `CudaTimer`
+  (RAII `cudaEvent_t` pair). Host wall-time for orchestration context
+  (e.g. total sweep time) uses inline `std::chrono::steady_clock` — 3 lines
+  at the call site, no wrapper type. Never use `steady_clock` for kernel
+  timing; it includes launch overhead (~5 µs) and OS jitter.
 - **Error checking**: every CUDA runtime call must be checked. Provide a
   `CUDA_CHECK(expr)` macro that prints `cudaGetErrorString` and aborts.
 - **Headers**: include `cuda_runtime.h` (and other CUDA headers, including
@@ -201,15 +200,23 @@ Do not load `ARD.md` in full unless reviewing a specific decision.
   `MatrixView<const T,S>`) — zero call-site churn. `cublas_gemm` is the
   exception: it takes writable views for A/B because C++ template argument
   deduction does not consider implicit conversions (see ARD §3).
-- **`MatrixView` dual-use**: (1) host-side view (`block`/`operator()`/
-  `is_contiguous`/converting ctor), (2) kernel-side POD descriptor (only
-  `ptr`/`rows`/`cols`/`ld` read directly). Host methods are **not**
-  `__device__`-callable; kernels read fields directly (see ARD §1).
+- **`MatrixView` dual-use**: (1) host-side view (`operator()` for element
+  access, converting ctor for const-correctness), (2) kernel-side POD
+  descriptor (only `ptr`/`rows`/`cols`/`ld` read directly). Host methods
+  are **not** `__device__`-callable; kernels read fields directly (see
+  ARD §1). No `block()` or `is_contiguous()` — the bench runner allocates
+  per-`N` (see ARD §5), so submatrix slicing and strided-copy dispatch
+  are gone. ColMajor is the only layout, enforced structurally by
+  `Matrix::alloc` setting `ld = rows`.
 - **`CublasMathModeGuard`** (free class in `src/cublas/CublasHandle.h`):
   RAII guard that captures the current math mode via
   `cublasGetMathMode`, sets a new mode, and restores the previous mode in
   the dtor. Used by `cublas_gemm` to apply `CublasTypeMap<T>::math_mode`
   per call. Non-copyable, non-movable. See ARD §9.
+- **Layout**: ColMajor only. No `Layout` enum, no `layout` field on
+  `MatrixView`/`Matrix`. `Matrix::alloc` sets `ld = rows` unconditionally.
+  If a future phase needs RowMajor, re-add a `Layout` tag + the branches
+  (5-line re-add per call site; not worth carrying as dead code).
 
 ### Warnings
 - Host CXX: full strict set (`-Wall -Wextra -Wpedantic -Wshadow -Wconversion`

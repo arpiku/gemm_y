@@ -11,10 +11,10 @@
 2.  Memcpy variant selection
 3.  Kernel abstraction: functors, not function pointers
 4.  Profiler: type-erased registry, cuBLAS implicit
-5.  Bench runner: pre-alloc + submatrix slicing
+5.  Bench runner: ~~pre-alloc + submatrix slicing~~ per-N allocation
 5.5. cuBLAS handle: stateful context, per-call stream binding
 6.  Accuracy tolerance
-7.  Timing: `CudaTimer` (device) vs `Tracer` (host)
+7.  Timing: `CudaTimer` (device) + inline `steady_clock` (host)
 8.  Arch-specific code: separate `.cu` files, no `#ifdef`
 9.  cuBLAS API choice: `cublasGemmEx` first
 10. Phase 1 validation
@@ -24,6 +24,7 @@
 14. Phase 1.5 validation
 15. `% perf vs cuBLAS` comparison metric
 16. Kernel file organization: shared `.cuh` + per-kernel `.cu`, `k0`/`k1`/… naming
+17. Phase 2D — per-N allocation + dead-code trim
 
 ---
 
@@ -35,43 +36,55 @@ Three orthogonal concerns are modeled by three types:
 | Type | Role | Ownership |
 |------|------|-----------|
 | `Buffer<T, Space>` | raw storage | owning (RAII) |
-| `MatrixView<T, Space>` | `{ptr, rows, cols, ld, Layout}` | non-owning |
+| `MatrixView<T, Space>` | `{ptr, rows, cols, ld}` | non-owning |
 | `Matrix<T, Space>` | `Buffer` + shape | owning |
 
-`Space` (`Host` / `Device`) and `Layout` (`ColMajor` / `RowMajor`) are
-**compile-time** template/enum tags, not runtime fields.
+`Space` (`Host` / `Device`) is a **compile-time** template/enum tag, not a
+runtime field. ~~`Layout` (`ColMajor` / `RowMajor`) is a compile-time
+enum tag.~~ **Phase 2D:** `Layout` is deleted. ColMajor is the only
+layout, enforced structurally by `Matrix::alloc` setting `ld = rows`.
 
 **`MatrixView` dual-use contract:** the type serves two roles:
-1. **Host-side view** — `block(r,c,m,n)` (zero-copy sub-view),
-   `operator()(i,j)` (element access), `is_contiguous()` (copy dispatch),
-   converting ctor `MatrixView<T,S> -> MatrixView<const T,S>` (const-correctness).
+1. **Host-side view** — `operator()(i,j)` (element access), converting
+   ctor `MatrixView<T,S> -> MatrixView<const T,S>` (const-correctness).
+   ~~`block(r,c,m,n)` (zero-copy sub-view), `is_contiguous()` (copy
+   dispatch).~~ **Phase 2D:** `block()` and `is_contiguous()` are deleted
+   (no strided buffers after per-`N` alloc; see §5 revised).
 2. **Kernel-side POD descriptor** — only `ptr`/`rows`/`cols`/`ld` are read
    directly (`A.ptr[i + k*A.ld]`). The host methods are **not**
    `__device__`-callable; kernels read fields directly. This is intentional:
-   the kernel knows its layout at compile time (hardcoded ColMajor in Phase 1)
-   and bypasses the runtime `layout` branch that `operator()` would incur.
+   the kernel knows its layout at compile time (ColMajor is the only
+   layout) and bypasses any runtime branch.
 
 ### Alternatives considered
-- **Runtime memory-space tag**: rejected. Loses compile-time dispatch of
-  `copy_*`; risks calling `cudaMemcpy` on a host pointer from a device kernel
+- **Runtime memory-space tag**: rejected. Loses compile-time dispatch;
+  risks calling `cudaMemcpy` on a host pointer from a device kernel
   with no compile error. The tag costs nothing (1 byte in the view) and
   buys type-level safety.
 - **Single `Tensor` type owning data + shape** (à la `torch::Tensor`):
   rejected. Conflates ownership with shape; submatrix would either copy or
   require a separate non-owning type anyway. The `Matrix`/`MatrixView` split
   mirrors `std::vector`/`std::span` and is the CUTLASS/CuTe convention.
-- **Layout as runtime field only**: rejected. Compile-time tag enables future
-  template specializations per layout without runtime branches in hot paths.
-  ColMajor is the default; RowMajor is reserved but not implemented in Phase 1.
+- **~~Layout as runtime field only~~**: ~~rejected. Compile-time tag enables
+  future template specializations per layout without runtime branches in
+  hot paths. ColMajor is the default; RowMajor is reserved but not
+  implemented in Phase 1.~~ **Phase 2D:** moot — `Layout` is deleted
+  entirely. ColMajor is the only layout. If RowMajor is ever needed, a
+  `Layout` tag + branches can be re-added in ~5 lines per call site.
 
 ### Consequences
 - Kernels take `MatrixView<T, Space::Device>` (or unpacked `ptr+rows+cols+ld`)
   — never raw `T* + N`. Enforces `ld`-awareness from day 1.
-- Submatrix slicing (`block(r,c,m,n)`) is zero-copy: returns a view with
+- ~~Submatrix slicing (`block(r,c,m,n)`) is zero-copy: returns a view with
   unchanged `ld` and offset `ptr`. This is what lets the bench runner
-  pre-allocate a single 4096×4096 buffer and feed submatrices to every kernel.
-- `copy_h2d` / `copy_d2h` are the **only** functions that touch `cudaMemcpy*`.
-  No hidden data movement anywhere else in the codebase.
+  pre-allocate a single 4096×4096 buffer and feed submatrices to every
+  kernel.~~ **Phase 2D:** the bench runner allocates per-`N` (see §5
+  revised); `block()` is deleted. `ld == N` for every kernel launch.
+- ~~`copy_h2d` / `copy_d2h` are the **only** functions that touch
+  `cudaMemcpy*`. No hidden data movement anywhere else in the codebase.~~
+  **Phase 2D:** `Copy.h` is deleted. `cudaMemcpy` is called directly from
+  `Profiler.cu`. Buffers are contiguous (`ld == N`), so `cudaMemcpy` is
+  always correct — no `cudaMemcpy2D` strided path.
 - `GemmArgs<T>` const-correctness: `A`/`B` are `MatrixView<const T, Device>`
   (read-only inputs), `C` is `MatrixView<T, Device>` (mutable output). Relies
   on `MatrixView`'s implicit converting ctor — zero call-site churn. `cublas_gemm`
@@ -83,31 +96,31 @@ Three orthogonal concerns are modeled by three types:
 ## 2. Memcpy variant selection
 
 ### Decision
-- **Contiguous copies** (`ld == rows` for ColMajor): `cudaMemcpy` (sync).
-- **Strided submatrix copies** (`ld > rows`): `cudaMemcpy2D`.
-- **Async path** (`cudaMemcpyAsync` on explicit stream): not wired in Phase 1.
-- **Direction dispatch**: `detail::copy_kind_v<Dst, Src>` is a `constexpr`
+- **Contiguous copies** (`ld == rows`): `cudaMemcpy` (sync).
+- ~~**Strided submatrix copies** (`ld > rows`): `cudaMemcpy2D`.~~
+  **Phase 2D:** deleted. The bench runner allocates per-`N` (see §5
+  revised), so `ld == N` always — no strided buffers, no `cudaMemcpy2D`.
+- **Async path** (`cudaMemcpyAsync` on explicit stream): not wired. When
+  async pipelining lands, either re-introduce a thin wrapper or thread an
+  explicit `cudaStream_t` through `run_sweep`.
+- ~~**Direction dispatch**: `detail::copy_kind_v<Dst, Src>` is a `constexpr`
   variable template mapping the `(Dst, Src)` Space pair to the
-  `cudaMemcpyKind` enum. Only `Host<->Device` specializations are defined;
-  a `static_assert` inside `detail::copy` rejects wrong-direction
-  instantiations (e.g. `copy<Host, Host>`) at compile time. The poison
-  primary template (`cudaMemcpyKind(-1)`) is a defensive secondary net.
-  This makes copy direction a compile-time property of the Space tags,
-  not a runtime argument.
+  `cudaMemcpyKind` enum.~~ **Phase 2D:** `Copy.h` is deleted. Direction
+  (`cudaMemcpyHostToDevice` / `cudaMemcpyDeviceToHost`) is explicit at the
+  call site in `Profiler.cu`. No `copy_kind_v` dispatch needed.
 
 ### Rationale
 - Sync vs async (default stream + sync) are **identical perf** when there is no
   overlap with compute. Async only wins when H2D/kernel/D2H are pipelined on
   a non-default stream — which is a Phase 2 concern (tiled kernels with
   double-buffering). Wiring it now is YAGNI.
-- `cudaMemcpy2D` is **mandatory** for strided submatrix copies. `cudaMemcpy`
-  would read contiguous bytes spanning rows, producing garbage. This is the
-  correctness floor for the bench runner's 4096-ld buffer feeding N×N kernels.
+- ~~`cudaMemcpy2D` is **mandatory** for strided submatrix copies.~~
+  **Phase 2D:** moot — no strided buffers after per-`N` alloc.
 - The bench runner isolates timings (no overlap), so sync is both simpler and
   sufficient.
 
 ### Validation
-`src/bench/memcpy_microbench.cu` (Chunk 2.2) measures all variants across the
+`src/bench/microbench/memcpy_microbench.cu` measures all variants across the
 size sweep. Results recorded here once run:
 
 ```
@@ -132,21 +145,29 @@ size sweep. Results recorded here once run:
 # interpretation: any kernel reporting < ~1.2 us is measurement noise.
 ```
 
-### Phase 1.5 correction — revert to sync
-The Phase 1 implementation used `cudaMemcpyAsync` + `cudaStreamSynchronize`
+**Phase 2D:** the strided_2d microbench variants are deleted (no longer
+representative — the bench runner uses contiguous `cudaMemcpy`
+exclusively). The contiguous + async variants remain.
+
+### ~~Phase 1.5 correction — revert to sync~~
+~~The Phase 1 implementation used `cudaMemcpyAsync` + `cudaStreamSynchronize`
 on the default stream, believing this was forward-compatible with Phase 2
 explicit streams. **This was wrong**: `cudaMemcpyAsync` on pageable host
 memory (which `std::vector<T>` gives) is **silently synchronous** — the
 runtime stages through an internal pinned buffer (extra host-side copy),
 then issues the DMA. The microbench confirmed `sync ≈ async` because both
-are sync; the async path adds staging overhead for no benefit.
+are sync; the async path adds staging overhead for no benefit.~~
 
-**Phase 1.5 fix (R1):** revert `Copy.h` to sync `cudaMemcpy` /
+~~**Phase 1.5 fix (R1):** revert `Copy.h` to sync `cudaMemcpy` /
 `cudaMemcpy2D`. Drop the `cudaStream_t` parameter and the
 `cudaStreamSynchronize` calls. True async is deferred to Phase 2 prep,
 where `Space::HostPinned` + `cudaHostAlloc` enables real overlap on an
 explicit stream. The `copy_h2d` / `copy_d2h` API regains the stream
-parameter only when pinned-ness is enforced at the call site.
+parameter only when pinned-ness is enforced at the call site.~~
+
+**Phase 2D:** `Copy.h` is deleted entirely. `cudaMemcpy` (sync,
+contiguous) is called directly from `Profiler.cu`. The async path remains
+deferred to Phase 2 prep (pinned host buffers + explicit stream).
 
 ---
 
@@ -263,42 +284,78 @@ bug. After R3, the cuBLAS row is simply the first row per N in
 
 ---
 
-## 5. Bench runner: pre-alloc + submatrix slicing
+## 5. Bench runner: ~~pre-alloc + submatrix slicing~~ per-N allocation
 
-### Decision
-- Pre-allocate 4096×4096 `Matrix<T,Device>` for A, B, C_max, **C_ref_max** (×4).
-- Pre-allocate 4096×4096 `Matrix<T,Host>` for H2D source + D2H sink.
-- Fill host A, B with deterministic pattern; `copy_h2d` once.
-- Per `N`: build sub-views via `block(0,0,N,N)` (ld=4096), feed to kernels.
+### Decision (Phase 2D — per-N allocation)
+- Per `N` in the sweep: allocate `Matrix<T,Device>` for A, B, C, C_ref
+  (×4), sized `N×N`. RAII — constructed and destroyed per iteration, no
+  manual `cudaFree`.
+- Per `N`: allocate `Matrix<T,Host>` for H2D source + D2H sink (×4),
+  sized `N×N`.
+- Per `N`: fill host A, B with deterministic pattern; `cudaMemcpy` H2D
+  of A+B (timed via `CudaTimer`, reported in the `h2d_ns` column for
+  every row at that `N`).
+- Per `N`: views are the full buffers (no `block()`); `ld == N` for
+  every kernel launch. cuBLAS and custom kernels see the same `ld == N`
+  layout — apples-to-apples, no strided-penalty on either side.
 
-### Rationale
-- **Memory**: 4 × 4096² × 2 bytes (bf16) = 128 MB device + 96 MB host.
+### Rationale (Phase 2D)
+- **`ld == N` is the point.** A kernel author writing a 128×128 tiled TC
+  kernel for `N=128` can now exercise the `ld == N` fast path. Under the
+  pre-alloc strategy, every kernel ran on `ld=4096` regardless of `N`, so
+  small-`N` benchmark numbers were unrepresentative of a real small-`N`
+  problem (4096 stride polluted L2/TLB, coalescing was wrong).
+- **`h2d_ns` is now semantically correct.** Was: a single global 4096²
+  H2D value stamped into every CSV row. Now: per-`N` H2D cost, reported
+  in the row for that `N`. A reader of the CSV sees the actual H2D cost
+  for the problem size of that row.
+- **Alloc cost is negligible.** `cudaMalloc`/`cudaFree` per `N` adds
+  ~10–100 µs per iteration, dwarfed by the 20 warmup + 50 timed kernel
+  launches (hundreds of µs to seconds). Not measurable in the kernel
+  timing (which uses `CudaTimer` around the kernel launch only).
+- **Same view feeds cuBLAS and custom kernels**: cuBLAS natively accepts
+  `lda/b/c`, so no special path. Apples-to-apples comparison.
+
+### ~~Decision (Phase 1 — pre-alloc + submatrix slicing)~~
+~~Pre-allocate 4096×4096 `Matrix<T,Device>` for A, B, C_max, C_ref_max (×4).~~
+~~Pre-allocate 4096×4096 `Matrix<T,Host>` for H2D source + D2H sink.~~
+~~Fill host A, B with deterministic pattern; `copy_h2d` once.~~
+~~Per `N`: build sub-views via `block(0,0,N,N)` (ld=4096), feed to kernels.~~
+
+### ~~Rationale (Phase 1)~~
+- ~~**Memory**: 4 × 4096² × 2 bytes (bf16) = 128 MB device + 96 MB host.~~
   Trivial on RTX 5070 (12 GB) and H100 (80 GB).
-- **Four separate allocations, not aliased**: A, B, C_max, C_ref_max are
+- ~~**Four separate allocations, not aliased**: A, B, C_max, C_ref_max are~~
   distinct `cudaMalloc` calls. CUDA guarantees live allocations have
   disjoint address ranges — this is a runtime contract, not best-effort.
   No aliasing risk between `C` (custom kernel output) and `C_ref` (cuBLAS
   reference). See §5.1 for the OOB-write risk and its mitigation.
-- **Alloc cost**: paid once at startup, not per-`N`. Removes allocation noise
+- ~~**Alloc cost**: paid once at startup, not per-`N`. Removes allocation noise~~
   from timing.
-- **`ld`-awareness is non-negotiable**: the submatrix has `ld=4096, N=32`.
+- ~~**`ld`-awareness is non-negotiable**: the submatrix has `ld=4096, N=32`.~~
   A kernel assuming `ld==N` would silently read/write out-of-bounds memory.
   The `MatrixView` API enforces `ld` propagation; kernels that ignore it will
   fail accuracy checks immediately (garbage output), not silently.
-- **Same view feeds cuBLAS and custom kernels**: cuBLAS natively accepts
+- ~~**Same view feeds cuBLAS and custom kernels**: cuBLAS natively accepts~~
   `lda/b/c`, so no special path. Apples-to-apples comparison.
 
 ### 5.1 C_ref storage: device global memory (VRAM), not host RAM
-- `C_ref_max` lives in **device global memory** for the full sweep lifetime.
-- Per `N`: cuBLAS writes `C_ref_max.block(0,0,N,N)` once; this block is
-  **read-only** for the rest of that `N`'s iteration. Custom kernels write
-  to `C_max`, never `C_ref_max`.
-- **OOB-write risk**: a buggy custom kernel that ignores `ld` could write
-  past `N` rows and corrupt `C_ref_max` (or `A_max`/`B_max`). CUDA will not
-  error — silent corruption. Mitigation: in **Debug builds only**, snapshot
-  `C_ref_max`'s N×N block before each custom kernel and verify unchanged
-  after. Cheap (one D2H + memcmp), debug-only, catches the bug class that
-  would otherwise make accuracy failures unattributable.
+- `C_ref` lives in **device global memory** for the duration of one `N`'s
+  iteration (allocated per-`N` in Phase 2D; was a 4096² pre-alloc block
+  in Phase 1).
+- Per `N`: cuBLAS writes `C_ref` once; this buffer is **read-only** for
+  the rest of that `N`'s iteration. Custom kernels write to `C`, never
+  `C_ref`.
+- **OOB-write risk**: a buggy custom kernel that writes past `N` rows
+  could corrupt `C_ref` (or `A`/`B`). CUDA will not error — silent
+  corruption. Mitigation: in **Debug builds only**, snapshot `C_ref`'s
+  `N×N` buffer before each custom kernel and verify unchanged after.
+  **Phase 2D:** the snapshot is a single contiguous `cudaMemcpy` of the
+  `N×N` `C_ref` buffer to a host `std::vector<T>` + `memcmp` after the
+  kernel runs. Cheap, debug-only, catches the bug class that would
+  otherwise make accuracy failures unattributable. (Phase 1 used an
+  element-loop snapshot via `hC_ref_max.view()(i, j)` — replaced by the
+  contiguous `cudaMemcpy` + `memcmp` in Phase 2D.)
 - **Why device, not host**: avoids a D2H copy of `C_ref` per kernel-under-test.
   Only one D2H of `C_ref` per `N` (for accuracy comparison on host). The
   device copy is the source of truth; host copy is for the comparator only.
@@ -405,23 +462,30 @@ arch,dtype,N,kernel_name,kernel_desc,h2d_ns,kernel_min_ns,kernel_median_ns,d2h_n
 
 ---
 
-## 7. Timing: `CudaTimer` (device) vs `Tracer` (host)
+## 7. Timing: `CudaTimer` (device) + inline `steady_clock` (host)
 
 ### Decision
-- `Tracer.h` (`steady_clock`): host-side orchestration only. Measures wall
-  time including launch overhead. **Never** used for kernel timing.
 - `CudaTimer.h` (`cudaEvent_t` pair): device-side timing for H2D, kernel,
-  D2H. RAII, move-only, ~20 lines.
+  D2H. RAII, move-only, ~20 lines. The only correct way to time device work.
+- Host sweep wall-time uses inline `std::chrono::steady_clock` — 3 lines
+  at the call site in `Profiler.cu` (start, stop, `printf` the delta). No
+  wrapper type. For orchestration context only (e.g. total sweep time);
+  never for kernel timing.
 
 ### Rationale
 - Host `steady_clock` includes kernel launch latency (~5 µs) and any OS
   scheduling jitter. For a 32×32 bf16 kernel that runs in ~1 µs, this is
-  5× noise — useless.
+  5× noise — useless for kernel timing.
 - `cudaEvent` records are inserted into the stream and timestamped by the
   GPU. They measure exactly the device work between record points, excluding
   launch overhead. This is the only correct way to time device work.
-- `Tracer` is preserved for host orchestration (e.g. total sweep wall time,
-  CSV write time) where launch overhead is irrelevant.
+- ~~`Tracer` is preserved for host orchestration (e.g. total sweep wall time,
+  CSV write time) where launch overhead is irrelevant.~~ **Phase 2D:**
+  `Tracer.h` is deleted. Its only consumer was one `tracer::Timer<>` in
+  `Profiler.cu` with two `mark()`s and one wall-time `printf` — replaced
+  by 3 lines of inline `steady_clock`. The `Tracer` abstraction (event
+  array, `string_view` lifetime footgun, capacity-128 default) was
+  unjustified overhead for a single start/end pair.
 
 ---
 
@@ -831,3 +895,100 @@ alongside `NaiveGemm` in `main.cpp`.
   new header (`gemm_bf16.cuh`) needs an include there too if unit tests
   for tiled kernels are desired. Defer until the kernel passes accuracy
   — the Profiler-level sweep already catches accuracy failures.
+
+---
+
+## 17. Phase 2D — per-N allocation + dead-code trim
+
+### Decision
+
+Replace the pre-allocated 4096×4096 + `block()` slicing strategy with
+per-`N` allocation, so `ld == N` for every kernel launch. Trim the dead
+surface area that existed only to support the pre-alloc strategy, plus
+the `Tracer` host-timer abstraction that was unjustified for a single
+start/end pair.
+
+**What changed:**
+
+- `Profiler::run_sweep` allocates A/B/C/C_ref (device + host) per `N`,
+  sized `N×N`. RAII; no manual `cudaFree`. `ld == N` for every kernel
+  launch (was `ld == 4096` regardless of `N`).
+- H2D A+B is timed per `N` via `CudaTimer` and reported in the `h2d_ns`
+  column for every row at that `N` (was: a single global 4096² value
+  stamped into every row — semantically wrong).
+- Debug OOB snapshot is a single contiguous `cudaMemcpy` of the `N×N`
+  `C_ref` buffer + `memcmp` (was: an element-loop snapshot via
+  `hC_ref_max.view()(i, j)`).
+- Host sweep wall-time uses 3 lines of inline `std::chrono::steady_clock`
+  at the call site (was: a `tracer::Timer<>` with two `mark()`s and a
+  wall-time `printf`).
+- `cudaMemcpy` is called directly from `Profiler.cu` with explicit
+  direction (`cudaMemcpyHostToDevice` / `cudaMemcpyDeviceToHost`). No
+  `Copy.h` wrapper, no `copy_kind_v` dispatch, no `cudaMemcpy2D` strided
+  path (buffers are contiguous, `ld == N`).
+
+**What was deleted:**
+
+| File / symbol | Why |
+|---------------|-----|
+| `src/Tracer.h` | One consumer in `Profiler.cu`; replaced by 3 lines of inline `steady_clock`. The `Event` array + `string_view` lifetime footgun was unjustified for a single start/end pair. |
+| `src/Copy.h` | `copy_h2d` / `copy_d2h` wrappers collapsed to direct `cudaMemcpy` calls. `CopyPlan` / `plan_copy` / `copy_kind_v` / `cudaMemcpy2D` path all dead after per-`N` alloc (no strided buffers). |
+| `src/Layout.h` | ColMajor is the only layout, enforced structurally by `Matrix::alloc` setting `ld = rows`. The `Layout` enum, the `layout` field on `MatrixView`/`Matrix`, and every `RowMajor` branch were dead code. |
+| `MatrixView::block()` | Only existed to slice the 4096² pre-alloc. Zero call sites after per-`N` alloc. |
+| `MatrixView::is_contiguous()` | Only used by `Copy.h` to dispatch `cudaMemcpy` vs `cudaMemcpy2D`. Always true after per-`N` alloc. |
+| `MatrixView`/`Matrix` `Layout` field + `RowMajor` branches | Dead — ColMajor-only is the stated invariant everywhere (AGENTS.md, ARD §9, every kernel comment, `cublas_gemm`). |
+| `memcpy_microbench` `strided_2d` variants | No longer representative — the bench runner uses contiguous `cudaMemcpy` exclusively. Contiguous + async variants kept. |
+| `test_matrixview_block`, `test_matrixview_is_contiguous`, `test_copy_roundtrip_submatrix`, `test_cublas_gemm_bf16_strided` | Exercises the deleted `block()` / `is_contiguous()` / strided-copy / strided-cuBLAS paths. |
+
+### Rationale
+
+- **`ld == N` is the point.** A kernel author writing a 128×128 tiled TC
+  kernel for `N=128` can now exercise the `ld == N` fast path. Under the
+  pre-alloc strategy, every kernel ran on `ld=4096` regardless of `N`, so
+  small-`N` benchmark numbers were unrepresentative of a real small-`N`
+  problem (4096 stride polluted L2/TLB, coalescing was wrong). cuBLAS
+  itself ran on the same strided layout, so the comparison was
+  apples-to-apples only because both sides were equally penalized.
+- **`h2d_ns` is now semantically correct.** Was: a single global 4096²
+  H2D value stamped into every CSV row. Now: per-`N` H2D cost, reported
+  in the row for that `N`.
+- **Dead code is debt.** `Tracer.h`, `Copy.h`, `Layout`, `block()`,
+  `is_contiguous()`, the `RowMajor` branches, and the strided microbench
+  variants existed only to support the pre-alloc strategy or were
+  unused abstractions. Carrying them as dead code risks future agents
+  re-using them by mistake and complicates every layout-aware function
+  with a branch that never executes.
+- **Alloc cost is negligible.** `cudaMalloc`/`cudaFree` per `N` adds
+  ~10–100 µs per iteration, dwarfed by the 20 warmup + 50 timed kernel
+  launches (hundreds of µs to seconds). Not measurable in the kernel
+  timing (which uses `CudaTimer` around the kernel launch only).
+
+### Consequences
+
+- Kernel authors can now write `ld == N` kernels and have the benchmark
+  reflect the real performance of an `N×N` problem.
+- The `MatrixView` POD is smaller (no `layout` field) — 4 fields instead
+  of 5. Kernels read `ptr`/`rows`/`cols`/`ld` directly.
+- `cudaMemcpy` direction is explicit at the call site in `Profiler.cu`.
+  When async pipelining lands (Phase 2 prep), either re-introduce a thin
+  wrapper or thread an explicit `cudaStream_t` through `run_sweep`.
+- If RowMajor is ever needed, re-add a `Layout` tag + the branches (~5
+  lines per call site; not worth carrying as dead code).
+
+### Validation
+
+```
+# Phase 2D refactor complete. No new features; correctness + hygiene only.
+# Test suite: 351 checks, 0 failures (was 874 after Phase 1.5;
+#   reduced by the 5 deleted strided/block/is_contiguous/copy_kind tests).
+# Build: clean, no warnings from the strict set.
+# Sweep: ./build/gemm_y runs end-to-end; CSV h2d_ns now varies per N
+#   (was a single global value); kernels see ld == N (verified via
+#   temporary printf in gemm_naive.cu, then removed).
+# Microbench: memcpy_microbench runs (contiguous + async variants only;
+#   strided_2d variants deleted).
+# Dashboard: ingests + renders without errors (no schema change; h2d_ns
+#   semantics shifted from global to per-N).
+#
+# Phase history: git log --grep="Phase: 2D"
+```

@@ -4,8 +4,8 @@
 //   Buffer<T, Space::Host>     -> 64-byte-aligned std::vector
 //
 // Move-only (no copy ctor/assign). Fixed at construction — no realloc/resize.
-// The bench runner pre-allocates a single 4096x4096 buffer and slices
-// submatrices out of it via MatrixView::block(); we never need to grow one.
+// The bench runner allocates per-N (see ARD §5), so each Matrix owns its own
+// Buffer for the lifetime of one N's iteration.
 //
 // Per AGENTS.md: RAII for all CUDA resources; never leak raw cudaFree across
 // early returns.

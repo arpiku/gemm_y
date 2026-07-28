@@ -74,15 +74,8 @@ void cublas_gemm(CublasHandle& handle,
                      m, k, k, n, m, n);
         std::abort();
     }
-    if (A.layout != Layout::ColMajor || B.layout != Layout::ColMajor ||
-        C.layout != Layout::ColMajor) {
-        // ColMajor invariant: the bench runner guarantees this; a violation
-        // is a programming error, not a runtime API contract. Debug-only assert.
-        GEMM_Y_ASSERT(A.layout == Layout::ColMajor &&
-                      B.layout == Layout::ColMajor &&
-                      C.layout == Layout::ColMajor,
-                      "cublas_gemm: only ColMajor supported");
-    }
+    // ColMajor is the only layout (enforced structurally by Matrix::alloc
+    // setting ld = rows); no runtime layout check needed.
 
     using TM = detail::CublasTypeMap<T>;
     const float alpha = 1.0f;
