@@ -2,13 +2,15 @@
 
 ## Current state
 
-- `k1_smem` is the fixed shared-memory control and remains active in the full benchmark.
+- `k1_smem` is the fixed shared-memory control.
 - `k1_t<64,64,16>` is implemented with dynamic shared memory and is named `k1_t`.
 - `k1_t` passes the current focused smoke and padded-leading-dimension checks.
-- `k0_ldg` and `k0_coalesced` are completed kernels retained for smoke/regression validation only.
-- The full benchmark contains the generic baseline and active `k1_smem`; tuning candidates are not registered there.
+- `k1_t` is the current benchmark target; retain `k1_smem` as the comparison control while collecting its base result.
+- The tuning candidate set remains separate from the normal full benchmark.
 - Candidate tuning uses a separate profile executable and must not modify `db/gemm_y.db`.
 - The user manually ingests selected CSV results.
+- `--custom-only` excludes only cuBLAS; use `--kernel-name k1_t` to ingest
+  only the canonical `k1_t` rows from a run that also contains `k1_smem`.
 
 ## 1. Base `k1_t` result
 
@@ -26,8 +28,11 @@
   ctest --test-dir build
   ```
 
-- [ ] Run the full active benchmark for the base `k1_t` result. Keep the full registry limited to the active kernel set; do not add completed k0 controls.
-- [ ] Preserve the resulting CSV and `.meta` files, then manually ingest the selected base result if desired.
+- [x] Register `k1_t` in the current active benchmark run alongside `k1_smem` and the generic baseline.
+- [x] Run the full active benchmark for the base `k1_t` result.
+- [x] Preserve the resulting CSV and `.meta` files for manual review.
+- [ ] Delete/re-ingest the selected base run with `--custom-only --kernel-name k1_t`
+      if only canonical `k1_t` rows should be retained.
 
 ## 2. Candidate profile for the tuning branch
 
@@ -84,7 +89,7 @@ Run this on the separate tuning branch after the base result is recorded.
 
 ## 5. Validation and promotion
 
-- [ ] After candidate/profile changes, run:
+- [x] After the benchmark/ingestion changes, run:
 
   ```sh
   cmake --build build --target kernel_smoke kernel_tuning dispatch_check -j
@@ -96,9 +101,11 @@ Run this on the separate tuning branch after the base result is recorded.
 - [ ] Run the comprehensive candidate profile with the user-run clock-locked benchmark wrapper when reproducible timing is required.
 - [ ] Compare candidates and dispatcher against cuBLAS and `k1_smem`.
 - [ ] Promote only the validated dispatcher or selected active candidate to the full benchmark registration.
-- [ ] Remove superseded kernels from the full benchmark registry without deleting their source, smoke coverage, or historical results.
+- [ ] Remove superseded kernels from the full benchmark registry without deleting their source or historical results.
 - [ ] Keep the final production registration explicit and free of commented-out candidates or runtime lifecycle flags.
-- [ ] Manually ingest only the benchmark CSV selected by the user, using `--custom-only` when explicit cuBLAS rows should not be duplicated.
+- [ ] Manually ingest only the benchmark CSV selected by the user. Use
+      `--custom-only --kernel-name k1_t` when only canonical `k1_t` rows should be
+      retained; use `--custom-only` alone when all custom kernels are wanted.
 
 ## Completion criteria
 

@@ -1,9 +1,9 @@
 // main.cpp — gemm_y entry point.
 //
 // Runs the configured dtype sweeps. The bf16 sweep registers the naive
-// baseline plus each active sm120 experiment, then writes the CSV and a
-// key=value `.meta` sidecar to results/. Other dtype sweeps currently retain
-// the naive baseline only.
+// baseline plus the active k1_smem and k1_t experiments, then writes the CSV
+// and a key=value `.meta` sidecar to results/. Other dtype sweeps currently
+// retain the naive baseline only.
 //
 // One (arch, dtype) pair per CSV. tf32 rows live in the tfloat CSV (the
 // only float path — see ARD §9). Hardcoded sweep (no argparse dependency).
@@ -122,6 +122,7 @@ void profile_bf16_kernels(const std::string &arch) {
   register_bf16_kernel<gemm_y::NaiveGemm<T>>(prof, kernels);
 #if defined(CUDA_ARCH_SM_120)
   register_bf16_kernel<gemm_y::k1_smem>(prof, kernels);
+  register_bf16_kernel<gemm_y::k1_t<64, 64, 16>>(prof, kernels);
 #endif
 
   const gemm_y::SweepResult result = prof.run_sweep(kSweepSizes);

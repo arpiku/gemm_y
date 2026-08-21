@@ -4,14 +4,15 @@
 Usage:
     python scripts/ingest.py results/bench_sm_120_bf16.csv [--label "..."]
     python scripts/ingest.py results/bench_sm_120_bf16.csv \
-        --custom-only --label "k0-ldg"
+        --custom-only --kernel-name k1_t --label "k1-t"
     python scripts/ingest.py results/bench_sm_120_bf16.csv --force
 
 The .meta sidecar is auto-discovered by replacing the .csv extension with
 .meta. Refuses to re-ingest the same (source_csv, source_meta, git_sha)
 tuple unless --force is given. With --custom-only, explicit cuBLAS rows are
-skipped while each custom row retains its embedded ref_kernel_* fields; the
-run is marked custom_only in the database.
+skipped while each retained custom row keeps its embedded ref_kernel_* fields;
+`--kernel-name` can additionally select exact custom kernel names. The run is
+marked custom_only in the database.
 
 Schema and query layer live in db.py. The DB is the source of truth for
 the dashboard; CSVs are regenerable and stay gitignored.
@@ -97,6 +98,7 @@ def ingest(
     label: Optional[str],
     force: bool,
     custom_only: bool = False,
+    kernel_names: Optional[set[str]] = None,
 ) -> int:
     meta_path = csv_path.with_suffix(".meta")
     if not csv_path.exists():
@@ -124,33 +126,6 @@ def ingest(
     sha = git_short_sha()
     source_csv = str(csv_path)
     source_meta = str(meta_path)
-
-    conn = db.connect()
-    if not force and db.run_exists(
-        conn, source_csv=source_csv, source_meta=source_meta, git_sha=sha
-    ):
-        print(
-            f"skip: already ingested (csv={source_csv}, meta={source_meta}, "
-            f"sha={sha}). Use --force to re-ingest.",
-            file=sys.stderr,
-        )
-        return 1
-
-    run_id = db.insert_run(
-        conn,
-        ingested_at=iso8601_now(),
-        git_sha=sha,
-        label=label,
-        arch=arch,
-        dtype=dtype,
-        source_csv=source_csv,
-        source_meta=source_meta,
-        warmup_iters=warmup,
-        timed_iters=timed,
-        tol=tol,
-        sweep_sizes=sweep_sizes,
-        custom_only=custom_only,
-    )
 
     # CSV schema (Phase 2G):
     #   arch,dtype,N,kernel_name,kernel_desc,
@@ -180,7 +155,6 @@ def ingest(
         "max_abs_err",
         "max_rel_err",
     ]
-    n_rows = 0
     with csv_path.open(newline="") as f:
         reader = csv.DictReader(f)
         fieldnames = reader.fieldnames or []
@@ -188,49 +162,86 @@ def ingest(
         if missing:
             print(f"error: CSV missing columns: {missing}", file=sys.stderr)
             return 2
-        for row in reader:
-            if custom_only and row["kernel_name"] == "cublas":
-                continue
-            db.insert_measurement(
-                conn,
-                run_id,
-                n=int(row["N"]),
-                kernel_name=row["kernel_name"],
-                kernel_desc=row["kernel_desc"],
-                h2d_ns=_to_float(row.get("h2d_ns")),
-                kernel_min_ns=_to_float(row["kernel_min_ns"]),
-                kernel_median_ns=_to_float(row["kernel_median_ns"]),
-                d2h_ns=_to_float(row.get("d2h_ns")),
-                kernel_std_ns=_to_float(row.get("kernel_std_ns")),
-                kernel_p95_ns=_to_float(row.get("kernel_p95_ns")),
-                kernel_ci_low_ns=_to_float(row.get("kernel_ci_low_ns")),
-                kernel_ci_high_ns=_to_float(row.get("kernel_ci_high_ns")),
-                ref_kernel_min_ns=_to_float(row["ref_kernel_min_ns"]),
-                ref_kernel_median_ns=_to_float(row["ref_kernel_median_ns"]),
-                ref_kernel_std_ns=_to_float(row.get("ref_kernel_std_ns")),
-                ref_kernel_p95_ns=_to_float(row.get("ref_kernel_p95_ns")),
-                ref_kernel_ci_low_ns=_to_float(row.get("ref_kernel_ci_low_ns")),
-                ref_kernel_ci_high_ns=_to_float(row.get("ref_kernel_ci_high_ns")),
-                max_abs_err=_to_float(row["max_abs_err"]),
-                max_rel_err=_to_float(row["max_rel_err"]),
-            )
-            # Parse kernel_samples_ns (semicolon-separated) and insert each
-            # sample into the `samples` table. Absent or empty -> no samples.
-            samples_str = row.get("kernel_samples_ns") or ""
-            if samples_str:
-                parts = [p for p in samples_str.split(";") if p]
-                for idx, part in enumerate(parts):
-                    ns = _to_float(part)
-                    if ns is not None:
-                        db.insert_sample(
-                            conn,
-                            run_id=run_id,
-                            n=int(row["N"]),
-                            kernel_name=row["kernel_name"],
-                            sample_index=idx,
-                            ns=ns,
-                        )
-            n_rows += 1
+        rows = [
+            row for row in reader if not custom_only or row["kernel_name"] != "cublas"
+        ]
+
+    if kernel_names is not None:
+        rows = [row for row in rows if row["kernel_name"] in kernel_names]
+        if not rows:
+            names = ", ".join(sorted(kernel_names))
+            print(f"error: no CSV rows matched --kernel-name: {names}", file=sys.stderr)
+            return 2
+
+    conn = db.connect()
+    if not force and db.run_exists(
+        conn, source_csv=source_csv, source_meta=source_meta, git_sha=sha
+    ):
+        print(
+            f"skip: already ingested (csv={source_csv}, meta={source_meta}, "
+            f"sha={sha}). Use --force to re-ingest.",
+            file=sys.stderr,
+        )
+        return 1
+
+    run_id = db.insert_run(
+        conn,
+        ingested_at=iso8601_now(),
+        git_sha=sha,
+        label=label,
+        arch=arch,
+        dtype=dtype,
+        source_csv=source_csv,
+        source_meta=source_meta,
+        warmup_iters=warmup,
+        timed_iters=timed,
+        tol=tol,
+        sweep_sizes=sweep_sizes,
+        custom_only=custom_only,
+    )
+
+    n_rows = 0
+    for row in rows:
+        db.insert_measurement(
+            conn,
+            run_id,
+            n=int(row["N"]),
+            kernel_name=row["kernel_name"],
+            kernel_desc=row["kernel_desc"],
+            h2d_ns=_to_float(row.get("h2d_ns")),
+            kernel_min_ns=_to_float(row["kernel_min_ns"]),
+            kernel_median_ns=_to_float(row["kernel_median_ns"]),
+            d2h_ns=_to_float(row.get("d2h_ns")),
+            kernel_std_ns=_to_float(row.get("kernel_std_ns")),
+            kernel_p95_ns=_to_float(row.get("kernel_p95_ns")),
+            kernel_ci_low_ns=_to_float(row.get("kernel_ci_low_ns")),
+            kernel_ci_high_ns=_to_float(row.get("kernel_ci_high_ns")),
+            ref_kernel_min_ns=_to_float(row["ref_kernel_min_ns"]),
+            ref_kernel_median_ns=_to_float(row["ref_kernel_median_ns"]),
+            ref_kernel_std_ns=_to_float(row.get("ref_kernel_std_ns")),
+            ref_kernel_p95_ns=_to_float(row.get("ref_kernel_p95_ns")),
+            ref_kernel_ci_low_ns=_to_float(row.get("ref_kernel_ci_low_ns")),
+            ref_kernel_ci_high_ns=_to_float(row.get("ref_kernel_ci_high_ns")),
+            max_abs_err=_to_float(row["max_abs_err"]),
+            max_rel_err=_to_float(row["max_rel_err"]),
+        )
+        # Parse kernel_samples_ns (semicolon-separated) and insert each
+        # sample into the `samples` table. Absent or empty -> no samples.
+        samples_str = row.get("kernel_samples_ns") or ""
+        if samples_str:
+            parts = [p for p in samples_str.split(";") if p]
+            for idx, part in enumerate(parts):
+                ns = _to_float(part)
+                if ns is not None:
+                    db.insert_sample(
+                        conn,
+                        run_id=run_id,
+                        n=int(row["N"]),
+                        kernel_name=row["kernel_name"],
+                        sample_index=idx,
+                        ns=ns,
+                    )
+        n_rows += 1
 
     print(
         f"ingested run id={run_id} arch={arch} dtype={dtype} "
@@ -253,8 +264,16 @@ def main() -> int:
         action="store_true",
         help="skip explicit cuBLAS rows; retain reference fields on custom rows",
     )
+    ap.add_argument(
+        "--kernel-name",
+        action="append",
+        dest="kernel_names",
+        metavar="NAME",
+        help="retain only this exact kernel name; repeat for multiple names",
+    )
     args = ap.parse_args()
-    return ingest(args.csv, args.label, args.force, args.custom_only)
+    kernel_names = set(args.kernel_names) if args.kernel_names else None
+    return ingest(args.csv, args.label, args.force, args.custom_only, kernel_names)
 
 
 if __name__ == "__main__":
