@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # bench.sh — reproducible benchmark wrapper (must be run with sudo).
 #
-# Locks the GPU graphics clock to max frequency, runs ./build/gemm_y as the
-# original (non-root) user, then resets clock/persistence on exit. Trap
-# ensures reset even on Ctrl-C or crash (ARD §18).
+# Locks the GPU graphics clock to max frequency, runs the selected benchmark
+# binary as the original (non-root) user, then resets clock/persistence on
+# exit. Trap ensures reset even on Ctrl-C or crash (ARD §18).
 #
 # Usage:
-#   sudo scripts/bench.sh
+#   sudo scripts/bench.sh                         # runs ./build/gemm_y
+#   sudo scripts/bench.sh ./build/gemm_y
 #
 # Why sudo: nvidia-smi clock locking (-lgc) requires root. The binary
 # itself runs as the original user so build artifacts aren't owned by root.
@@ -21,6 +22,7 @@
 set -euo pipefail
 
 GPU_ID=${GPU_ID:-0}
+BENCH_BINARY=${1:-./build/gemm_y}
 
 # The original (pre-sudo) user, so we can drop privileges for the binary.
 ORIG_USER="${SUDO_USER:-$USER}"
@@ -76,8 +78,13 @@ TEMP_BEFORE=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader -i "$
 echo "[bench] pre-run temperature: ${TEMP_BEFORE} C"
 
 # 5. Drop privileges and run the binary as the original user.
-echo "[bench] running ./build/gemm_y as '${ORIG_USER}'..."
-sudo -u "${ORIG_USER}" ./build/gemm_y
+if [[ ! -x "${BENCH_BINARY}" ]]; then
+    echo "error: benchmark binary is not executable: ${BENCH_BINARY}" >&2
+    exit 1
+fi
+
+echo "[bench] running ${BENCH_BINARY} as '${ORIG_USER}'..."
+sudo -u "${ORIG_USER}" "${BENCH_BINARY}"
 
 # 6. Post-run temperature (thermal delta sanity check).
 TEMP_AFTER=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader -i "${GPU_ID}" | head -n1 | tr -d ' ')

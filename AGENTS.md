@@ -124,10 +124,12 @@ The square sweep is:
 1024, 1536, 2048, 3072, 4096
 ```
 
-Each size runs cuBLAS and every registered custom kernel with warmups and timed CUDA-event samples. For quick validation, build and run `kernel_smoke` before the full suite; it checks only the kernels under active development at sizes `{32, 96, 128}`. Reproducible benchmark runs must use:
+Each size runs cuBLAS and every registered custom kernel with warmups and timed CUDA-event samples. For quick validation, build and run `kernel_smoke` before the full suite; it checks only the kernels under active development at sizes `{32, 96, 128}`. Reproducible benchmark runs must use the clock-locked wrapper. It accepts an
+optional executable path; the default remains the full benchmark:
 
 ```sh
 sudo scripts/bench.sh
+sudo scripts/bench.sh ./build/gemm_y
 ```
 
 Results are written to `results/` and can be ingested into the SQLite dashboard with the scripts under `scripts/`. For experiment runs that should not duplicate explicit cuBLAS rows, use `python scripts/ingest.py <csv> --custom-only --label <label>`; custom rows retain their embedded `ref_kernel_*` reference statistics.
@@ -136,7 +138,7 @@ When validating code, the model must run the produced executable where practical
 
 ## Experiment workflow
 
-The current workflow uses documentation-first contracts followed by isolated bf16 experiments. Change one kernel variable at a time, keep each candidate independently benchmarkable, and validate new kernels with `kernel_smoke` before the full suite or clock-locked benchmark.
+The current workflow uses documentation-first contracts followed by isolated bf16 experiments. Change one kernel variable at a time, keep each candidate independently benchmarkable, and validate new kernels with `kernel_smoke` before the full suite or clock-locked benchmark. A completed tuning round is promoted into source and its temporary tuning infrastructure is removed.
 
 Full-benchmark registration and smoke/regression registration may differ. The full benchmark explicitly lists the generic baseline and active experiments; completed kernels may be removed from that list while remaining in source, historical result storage, and the smoke test as regression controls. Registration lists must be explicit and reproducible; do not use commented-out registrations or runtime lifecycle flags.
 
@@ -152,17 +154,18 @@ The active optimization workflow is documented by the kernel contract, explicit 
 ### Active and completed kernel lifecycle
 
 - The full benchmark registry contains only the generic baseline and currently active kernels.
-- Completed kernels may remain in source and in `kernel_smoke` as regression controls, but must be removed from the full benchmark registration list.
+- Completed kernel implementations may remain in source and historical results. They may remain in `kernel_smoke` only when they are deliberately retained as explicit regression controls; tuning-only validation executables and candidate-matrix tests are removed after policy promotion.
 - Do not delete completed kernel implementations or historical CSV/results solely because they are no longer active.
 - Registration lists must be explicit and reproducible; do not use commented-out registrations or runtime lifecycle flags.
-- Keep the active `k1_` family in the full benchmark until its replacement is validated and deliberately promoted.
+- Keep the active `k1_` family in the full benchmark until its replacement is validated and deliberately promoted; after promotion, retain only the production dispatcher and any explicitly chosen comparison control.
 
 ### Tuning and offline dispatch
 
-- Compile-time kernel candidates are independently benchmarkable functor specializations. Candidate registration belongs in a dedicated tuning/profile executable, not in `src/main.cpp` or the normal full benchmark.
-- A tuning profile must record accuracy-passing candidates and CUDA-event timing rows in CSV plus metadata. The database is never modified automatically; selected results are manually ingested by the user.
-- Dispatch selection is offline: a selector reads a benchmark CSV and emits a deterministic generated C++ policy. The initial policy key is `(arch, dtype, N)` because the project currently supports square GEMM only.
-- The production dispatcher must contain only compile-time candidate calls and a deterministic fallback. It must not benchmark, synchronize for measurement, allocate, perform file I/O, query SQLite, or use string-based runtime lookup.
-- Candidate names must be unique per concrete specialization. The canonical `k1_t<64,64,16>` name is `k1_t`; do not create a second benchmark identity for the same specialization.
-- Validate the generated policy separately from candidate correctness by checking selected names, fallback behavior, output accuracy, and dispatcher timing. Do not promote a dispatcher into the full benchmark until the profile and policy pass these checks.
-- Autotuning must remain architecture- and dtype-specific. A future extension may key by `(arch, dtype, M, N, K)` when non-square shapes are supported; do not add runtime shape generalization prematurely.
+- Compile-time kernel candidates are independently benchmarkable functor specializations. Candidate registration belongs in a temporary, dedicated tuning/profile executable, never in `src/main.cpp` or the normal full benchmark.
+- A tuning profile records accuracy-passing candidates and CUDA-event timing rows in CSV plus metadata. It must not modify SQLite; the user may manually ingest selected results.
+- Tuning is an offline, one-off workflow for a sound kernel family or major optimization step. A selector may read one architecture/dtype CSV and emit a temporary deterministic policy, but the selector and profile executable are deleted after the validated policy is promoted.
+- The permanent production dispatcher must be committed in source. It contains only compile-time candidate calls and a deterministic fallback. It must not benchmark, synchronize for measurement, allocate, perform file I/O, query SQLite, or use runtime string lookup.
+- Candidate names must be unique per concrete specialization within each tuning round. The canonical `k1_t<64,64,16>` name is `k1_t`; do not create a second benchmark identity for that specialization. Recreating a purpose-built selector for a later kernel family is preferred over maintaining a premature generic selector.
+- Validate the temporary policy separately from candidate correctness by checking selected names, fallback behavior, output accuracy, and dispatcher timing before source promotion. After promotion, replace tuning-only validation with production smoke and regression coverage.
+- New or materially modified CUDA kernels should check launch errors consistently. Existing kernels do not require an unrelated cleanup pass.
+- Autotuning must remain architecture- and dtype-specific. The policy key is `(arch, dtype, N)` for the current square-GEMM scope; a future extension may key by `(arch, dtype, M, N, K)` when nonsquare shapes are supported. Do not add runtime shape generalization prematurely.

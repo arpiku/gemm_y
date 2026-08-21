@@ -213,45 +213,8 @@ if(GEMM_Y_CUDA_ARCH STREQUAL "sm_120")
     gemm_y_apply_common_flags(kernel_smoke)
     add_test(NAME kernel_smoke COMMAND kernel_smoke)
 
-    add_executable(kernel_tuning
-        tests/kernel_tuning.cu
-        ${_gemm_y_arch_sources}
-        ${_gemm_y_bench_sources}
-    )
-    target_include_directories(kernel_tuning PRIVATE src)
-    target_link_libraries(kernel_tuning PRIVATE CUDA::cublas)
-    gemm_y_apply_common_flags(kernel_tuning)
-
-    find_package(Python3 COMPONENTS Interpreter REQUIRED)
-    set(_gemm_y_policy_header "${CMAKE_CURRENT_BINARY_DIR}/generated/k1_policy.h")
-    add_custom_command(
-        OUTPUT "${_gemm_y_policy_header}"
-        COMMAND ${CMAKE_COMMAND} -E make_directory
-                "${CMAKE_CURRENT_BINARY_DIR}/generated"
-        COMMAND ${Python3_EXECUTABLE}
-                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/select_kernel.py"
-                "${CMAKE_CURRENT_SOURCE_DIR}/tests/dispatch_fixture.csv"
-                --output "${_gemm_y_policy_header}"
-                --sizes 32 256
-        DEPENDS
-            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/select_kernel.py"
-            "${CMAKE_CURRENT_SOURCE_DIR}/tests/dispatch_fixture.csv"
-        VERBATIM
-    )
-    add_custom_target(k1_policy DEPENDS "${_gemm_y_policy_header}")
-
-    add_executable(dispatch_check
-        tests/dispatch_check.cu
-        "${_gemm_y_policy_header}"
-        ${_gemm_y_arch_sources}
-        ${_gemm_y_bench_sources}
-    )
-    add_dependencies(dispatch_check k1_policy)
-    target_include_directories(dispatch_check PRIVATE src
-        "${CMAKE_CURRENT_BINARY_DIR}")
-    target_link_libraries(dispatch_check PRIVATE CUDA::cublas)
-    gemm_y_apply_common_flags(dispatch_check)
-    add_test(NAME dispatch_check COMMAND dispatch_check)
+    # The source-level dispatcher is included by the production and smoke
+    # translation units; no generated policy or tuning target is required.
 endif()
 
 # ---------------------------------------------------------------------------

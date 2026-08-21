@@ -271,12 +271,12 @@ struct TiledGemm {
   append its `name()`/`description()` to metadata in the same operation. This
   prevents benchmark entries and `.meta` entries from drifting apart.
 
-The current profiler is a variant benchmarker, not a runtime autotuner. A
-tuning search must register each candidate specialization separately so that
-each candidate receives independent timing, accuracy, CSV, and metadata rows.
-A future runtime selection layer may choose among accepted candidates, but it
-must remain outside `Profiler::run_sweep()` and must not combine multiple
-configurations inside one timed `operator()` call.
+The current profiler is a variant benchmarker, not an autotuner. A temporary
+offline tuning search must register each candidate specialization separately so
+that each candidate receives independent timing, accuracy, CSV, and metadata
+rows. Selection remains outside `Profiler::run_sweep()` and outside timed
+`operator()` calls. After validation, the selected policy is promoted into a
+source-level dispatcher; it is not discovered or changed at runtime.
 
 Template definitions remain in the architecture-specific `.cu` file. Every
 registered specialization must be explicitly instantiated there, or otherwise
@@ -1394,56 +1394,66 @@ commands remain a user-run operation because they require `sudo`.
 
 ---
 
-## 22. Active kernels, offline tuning, and generated dispatch
+## 22. Active kernels, one-off tuning, and source-level dispatch
 
 ### Decision
 
-The full benchmark and tuning profile have separate registration roles. The
-full benchmark registers the generic baseline and active production candidates
-only. Completed kernels are removed from that list but remain in source,
-historical results, and focused smoke/regression coverage. Registration lists
-are explicit; lifecycle state is not represented by commented-out code or
-runtime flags.
+The full benchmark and temporary tuning profile have separate registration
+roles. The full benchmark registers the generic baseline, the production
+dispatcher, and only explicitly selected comparison controls. A tuning profile
+registers concrete compile-time candidate specializations independently so that
+each receives its own accuracy and timing row. Candidate registration must not
+expand the normal production benchmark.
 
-Compile-time kernel specializations are profiled independently by a dedicated
-tuning executable. The profile records accuracy-passing rows and CUDA-event
-timings in CSV and metadata. It does not write to SQLite. The user manually
-ingests selected results when they are worth preserving.
+Tuning is an offline, one-off workflow used only after a kernel family or major
+optimization step is sound. A temporary profile records accuracy-passing
+CUDA-event timings in CSV and metadata without writing to SQLite. A temporary
+selector may compare candidates against a fixed fallback using
+`kernel_median_ns`, an explicit improvement threshold, and deterministic
+tie-breaking. The current square-GEMM policy key is `(arch, dtype, N)`.
 
-An offline selector reads one architecture/dtype benchmark CSV and emits a
-deterministic generated C++ policy. The initial key is `(arch, dtype, N)` for
-the current square-GEMM scope. The selector compares candidates with the fixed
-fallback using `kernel_median_ns`, applies an improvement threshold, and emits
-the fallback for unsupported or insufficiently improved sizes.
+After validation, the selected mapping is materialized as a committed source
+`k1_dispatch` functor. The permanent dispatcher is a thin compile-time switch
+that calls known candidate functors and a deterministic fallback. It must not
+benchmark, synchronize for measurement, allocate, perform I/O, query SQLite, or
+use runtime string lookup. The generated header is only an intermediate
+promotion artifact; it is not the production source of truth.
 
-The production dispatcher is a thin compile-time switch over generated policy
-entries. It may call only known candidate functors and the deterministic
-fallback. It must not benchmark, synchronize for measurement, allocate, perform
-I/O, query SQLite, or use runtime string lookup. Generated policy validation
-must separately check selected candidate names, fallback behavior, numerical
-accuracy, and dispatcher timing before promotion to the full benchmark.
+Once the source dispatcher is validated, the temporary selector, profile
+executable, fixture, generated-policy build rule, and tuning-only validation
+executable are removed. Concrete candidate implementations may remain in source
+for future work, but their temporary tuning registrations do not.
 
 The canonical name for `k1_t<64,64,16>` is `k1_t`; distinct names are required
-for distinct concrete specializations only. Future non-square support may extend
-the policy key to `(arch, dtype, M, N, K)`, but runtime shape generalization is
-out of scope until that contract changes.
+for distinct concrete specializations within a tuning round. Recreating a
+purpose-built architecture-/dtype-specific selector for a later major tuning
+round is preferred over maintaining a premature generic autotuning framework.
+Future nonsquare support may extend the policy key to `(arch, dtype, M, N, K)`,
+but runtime shape generalization is out of scope until that contract changes.
+
+New or materially modified CUDA kernels should check launch errors consistently.
+This is a forward-looking development requirement; it does not require an
+unrelated cleanup pass over existing kernels.
 
 ### Rationale
 
-Separating profile registration from production registration prevents every
-candidate experiment from expanding the normal benchmark and avoids stale
-candidate lists after a policy is selected. Offline selection preserves
-zero-overhead production dispatch and makes policy generation reproducible from
-an auditable CSV. Keeping the fallback explicit provides defined behavior for
-sizes absent from the profile or below the improvement threshold.
+Separating temporary profile registration from production registration prevents
+candidate experiments from expanding the normal benchmark. Freezing the
+validated result into source removes runtime and build-time policy dependencies
+from production while preserving zero-overhead dispatch. Deleting the temporary
+selector avoids maintaining a specialized tool that is only useful for one
+kernel family; a future tuning round can recreate the small tool when justified.
+An explicit fallback provides defined behavior for sizes absent from the
+profile or below the improvement threshold.
 
 ### Consequences
 
-- Candidate implementations remain compiled because generated dispatch calls
-  them, even when they are not registered in `src/main.cpp`.
-- A generated policy is a build artifact and must not be hand-edited.
-- Candidate/profile CSVs and sidecar metadata are preserved for manual review;
-  `db/gemm_y.db` remains unchanged unless the user explicitly ingests data.
-- A policy can be regenerated for a different architecture, dtype, or threshold
-  without changing kernel source, but the generated header must be rebuilt and
-  validated as a separate artifact.
+- The production dispatcher and the candidate implementations it calls remain
+  compiled, even though candidates are no longer individually registered in
+  `src/main.cpp`.
+- Generated policy headers, tuning CSVs, metadata, fixtures, and profile
+  executables are temporary workflow artifacts, not production dependencies.
+- The user may preserve selected benchmark results by manually ingesting them;
+  tuning and dispatch tooling must not modify `db/gemm_y.db` automatically.
+- Future tuning requires an explicit candidate manifest, an architecture-/dtype-
+  specific profile, offline selection, source promotion, and cleanup again.

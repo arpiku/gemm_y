@@ -1,117 +1,100 @@
-# TODO.md — Templated kernel profiling and offline dispatch
+# TODO.md — Promoted `k1_` dispatch policy
 
 ## Current state
 
-- `k1_smem` is the fixed shared-memory control.
-- `k1_t<64,64,16>` is implemented with dynamic shared memory and is named `k1_t`.
-- `k1_t` passes the current focused smoke and padded-leading-dimension checks.
-- `k1_t` is the current benchmark target; retain `k1_smem` as the comparison control while collecting its base result.
-- The tuning candidate set remains separate from the normal full benchmark.
-- Candidate tuning uses a separate profile executable and must not modify `db/gemm_y.db`.
-- The user manually ingests selected CSV results.
-- `--custom-only` excludes only cuBLAS; use `--kernel-name k1_t` to ingest
-  only the canonical `k1_t` rows from a run that also contains `k1_smem`.
+- `k1_smem` is the fixed shared-memory comparison control and deterministic
+  dispatcher fallback.
+- The validated `sm_120/bf16` tuning profile selected a source-level policy for
+  the supported square sizes:
 
-## 1. Base `k1_t` result
+  ```text
+  32,64                    -> k1_t_32x64x16
+  96,128,192,256,384,512   -> k1_t_64x32x16
+  768                      -> k1_t_64x64x8
+  1024,1536,2048,3072,4096 -> k1_t
+  unsupported sizes        -> k1_smem
+  ```
 
-- [x] Keep `k1_t<64,64,16>` as the canonical base candidate with the short name `k1_t`.
-- [x] Keep `k1_smem` unchanged as the fixed comparison and fallback control.
-- [x] Use compile-time `TileM`, `TileN`, and `TileK` parameters with a fixed `16x16` thread block.
-- [x] Use single-buffered dynamic shared memory and pass the computed byte count at launch.
-- [x] Preserve arbitrary valid leading dimensions, ColMajor addressing, boundary guards, and FP32 accumulation.
-- [x] Register `k1_t` in `kernel_smoke` and validate contiguous, partial-tile, K-boundary, and padded-leading-dimension cases.
-- [x] Build and run:
+- The user owns benchmark-result review and database ingestion. Development,
+  building, testing, and dispatching do not modify `db/gemm_y.db`.
+- The generated policy and one-off tuning workflow were temporary promotion
+  artifacts and have been removed after the policy was frozen in source.
+
+## 1. Permanent dispatcher
+
+- [x] Add `src/sm120/k1_dispatch.cuh` with the validated explicit `switch (N)`.
+- [x] Keep the stable public name `k1_dispatch`.
+- [x] Call concrete compile-time `k1_t` specializations directly.
+- [x] Retain `k1_smem` as the deterministic unsupported-size fallback.
+- [x] Keep `selected_kernel_name(int)` as a constexpr inspection helper.
+- [x] Keep dispatch free of timing synchronization, allocation, I/O, SQLite,
+      and runtime string lookup.
+- [x] Keep candidate implementations independently available in source.
+
+## 2. Production registration
+
+- [x] Register `NaiveGemm`, `k1_smem`, and `k1_dispatch` in `src/main.cpp`.
+- [x] Remove direct production registration of individual tuned variants.
+- [x] Preserve explicit registration and metadata for the production CSV/meta
+      output.
+- [x] Keep completed k0 kernels available as smoke/regression controls without
+      rerunning them in the normal full benchmark.
+
+## 3. Tuning infrastructure cleanup
+
+- [x] Remove the generated-policy CMake command and build dependency.
+- [x] Remove the temporary `kernel_tuning`, `dispatch_check`, and
+      `k1_dispatch_profile` targets.
+- [x] Remove the temporary selector, profile/check sources, and fixture.
+- [x] Keep the concrete `k1_t` implementations and historical result artifacts.
+- [x] Keep the database untouched by this promotion.
+
+## 4. Production validation
+
+- [x] Update `kernel_smoke` to validate `k1_dispatch` at `{32, 96, 128}`.
+- [x] Keep k0 controls and `k1_smem` in smoke/regression coverage.
+- [x] Keep the padded-leading-dimension correctness check through the dispatcher.
+- [x] Check unsupported-size fallback through `selected_kernel_name(999)`.
+- [x] Build and run the production smoke target:
 
   ```sh
   cmake --build build --target kernel_smoke -j
   ./build/kernel_smoke
-  ctest --test-dir build
   ```
 
-- [x] Register `k1_t` in the current active benchmark run alongside `k1_smem` and the generic baseline.
-- [x] Run the full active benchmark for the base `k1_t` result.
-- [x] Preserve the resulting CSV and `.meta` files for manual review.
-- [ ] Delete/re-ingest the selected base run with `--custom-only --kernel-name k1_t`
-      if only canonical `k1_t` rows should be retained.
-
-## 2. Candidate profile for the tuning branch
-
-Run this on the separate tuning branch after the base result is recorded.
-
-- [ ] Keep the candidate set explicit and small initially:
-
-  ```text
-  k1_t
-  k1_t_32x64x16
-  k1_t_64x32x16
-  k1_t_64x64x8
-  ```
-
-- [ ] Do not register the candidate set in `src/main.cpp` or the normal full benchmark.
-- [ ] Ensure each concrete specialization has exactly one unique benchmark name. Do not create a second identity for `k1_t<64,64,16>`.
-- [ ] Keep `k1_smem` in the profile as the fixed fallback/control.
-- [ ] Use the complete supported square sweep:
-
-  ```text
-  32, 64, 96, 128, 192, 256, 384, 512, 768,
-  1024, 1536, 2048, 3072, 4096
-  ```
-
-- [ ] Make the tuning executable emit reusable CSV and sidecar metadata containing accuracy-passing rows, CUDA-event timing statistics, candidate descriptions, architecture, and dtype.
-- [ ] Filter correctness failures before using timing rows.
-- [ ] Compare candidates by `kernel_median_ns`; retain p95/std/CI for stability review and deterministic tie-breaking.
-- [ ] Preserve the profile CSV and metadata for manual review. Never modify `db/gemm_y.db` automatically.
-
-## 3. Offline policy generation
-
-- [x] Add `scripts/select_kernel.py` with CSV-only input and no database access.
-- [x] Use `k1_smem` as the deterministic fallback.
-- [x] Use an explicit improvement threshold, initially 2%, against the fallback median.
-- [x] Generate an explicit compile-time `switch (N)` policy for the current square-GEMM scope.
-- [x] Reject unsupported architecture/dtype policy generation.
-- [x] Keep the canonical candidate map consistent with the concrete functor names.
-- [ ] Generate a policy from the real tuning CSV, not only `tests/dispatch_fixture.csv`.
-- [ ] Record source identifier, architecture, dtype, selected candidate per size, fallback, metric, threshold, and accuracy tolerance in generated-header metadata.
-- [ ] Keep generated policy files under `build/generated` or another explicitly requested output directory; do not hand-edit them.
-
-## 4. Dispatcher validation
-
-- [x] Add a fixture-based policy generation check in the build.
-- [x] Add `k1_dispatch` as a thin generated-policy functor.
-- [x] Keep dispatcher execution free of benchmarking, measurement synchronization, allocation, file I/O, SQLite access, and runtime string lookup.
-- [x] Add generated-policy name inspection so tests can verify selected candidates and fallback behavior.
-- [ ] Generate the policy from the real comprehensive profile.
-- [ ] Verify every profiled size selects the expected candidate or `k1_smem` fallback.
-- [ ] Verify unsupported sizes use the fallback.
-- [ ] Run dispatcher correctness against cuBLAS and compare against the selected candidate.
-- [ ] Measure dispatcher timing separately and confirm it matches the selected candidate within normal measurement noise.
-- [ ] Do not promote `k1_dispatch` into `src/main.cpp` until the profile and dispatcher checks pass.
-
-## 5. Validation and promotion
-
-- [x] After the benchmark/ingestion changes, run:
+- [x] Build the complete production tree and run CTest:
 
   ```sh
-  cmake --build build --target kernel_smoke kernel_tuning dispatch_check -j
-  ./build/kernel_smoke
-  ./build/dispatch_check
-  ctest --test-dir build
+  cmake --build build -j
+  ctest --test-dir build --output-on-failure
   ```
 
-- [ ] Run the comprehensive candidate profile with the user-run clock-locked benchmark wrapper when reproducible timing is required.
-- [ ] Compare candidates and dispatcher against cuBLAS and `k1_smem`.
-- [ ] Promote only the validated dispatcher or selected active candidate to the full benchmark registration.
-- [ ] Remove superseded kernels from the full benchmark registry without deleting their source or historical results.
-- [ ] Keep the final production registration explicit and free of commented-out candidates or runtime lifecycle flags.
-- [ ] Manually ingest only the benchmark CSV selected by the user. Use
-      `--custom-only --kernel-name k1_t` when only canonical `k1_t` rows should be
-      retained; use `--custom-only` alone when all custom kernels are wanted.
+## 5. User-run final benchmark and ingestion
 
-## Completion criteria
+After the production validation above passes, run the reproducible benchmark as
+an ordinary user through the clock-locking wrapper:
 
-- [ ] Base `k1_t` benchmark result is preserved and manually ingested if selected.
-- [ ] Comprehensive candidate profile covers the full square sweep and emits CSV plus metadata.
-- [ ] Generated policy is deterministic, auditable, and database-independent.
-- [ ] Dispatcher selected-name, fallback, accuracy, and timing checks pass.
-- [ ] Production registration contains only the promoted active strategy.
-- [ ] `db/gemm_y.db` remains unchanged until the user explicitly ingests selected results.
+```sh
+sudo scripts/bench.sh ./build/gemm_y
+```
+
+Review that the generated `results/bench_sm_120_bf16.csv` and `.meta` contain:
+
+```text
+cublas, naive, k1_smem, k1_dispatch
+```
+
+The user may then manually ingest the selected production result. Use
+`--custom-only --kernel-name k1_dispatch` if only dispatcher rows are wanted, or
+`--custom-only` if both custom production kernels are wanted. Do not run `sudo`
+or perform ingestion automatically as part of development.
+
+## Future tuning policy
+
+- Recreate a small architecture-/dtype-specific profile only for a justified
+  future `k1_` optimization round.
+- Register each concrete candidate exactly once in that temporary profile,
+  collect accuracy-passing CUDA-event timings, select offline, materialize the
+  result in `k1_dispatch.cuh`, and remove the temporary tooling again.
+- Keep the policy key `(arch, dtype, N)` while GEMM supports only square shapes.
+  Do not introduce runtime shape generalization prematurely.
