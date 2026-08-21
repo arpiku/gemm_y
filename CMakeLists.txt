@@ -198,6 +198,23 @@ gemm_y_apply_common_flags(test_cuda)
 add_test(NAME test_cuda COMMAND test_cuda)
 
 # ---------------------------------------------------------------------------
+# Focused kernel smoke target
+# ---------------------------------------------------------------------------
+# The current low-level experiments are sm120-specific. Keep this target
+# separate from test_cuda so it can be run before the broader test suite.
+if(GEMM_Y_CUDA_ARCH STREQUAL "sm_120")
+    add_executable(kernel_smoke
+        tests/kernel_smoke.cu
+        ${_gemm_y_arch_sources}
+        ${_gemm_y_bench_sources}
+    )
+    target_include_directories(kernel_smoke PRIVATE src)
+    target_link_libraries(kernel_smoke PRIVATE CUDA::cublas)
+    gemm_y_apply_common_flags(kernel_smoke)
+    add_test(NAME kernel_smoke COMMAND kernel_smoke)
+endif()
+
+# ---------------------------------------------------------------------------
 # Microbench targets (optional; not part of the default build)
 # ---------------------------------------------------------------------------
 # These are standalone executables with their own main(). They are NOT added

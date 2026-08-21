@@ -3,11 +3,15 @@
 
 Usage:
     python scripts/ingest.py results/bench_sm_120_bf16.csv [--label "..."]
+    python scripts/ingest.py results/bench_sm_120_bf16.csv \
+        --custom-only --label "k0-ldg"
     python scripts/ingest.py results/bench_sm_120_bf16.csv --force
 
 The .meta sidecar is auto-discovered by replacing the .csv extension with
 .meta. Refuses to re-ingest the same (source_csv, source_meta, git_sha)
-tuple unless --force is given.
+tuple unless --force is given. With --custom-only, explicit cuBLAS rows are
+skipped while each custom row retains its embedded ref_kernel_* fields; the
+run is marked custom_only in the database.
 
 Schema and query layer live in db.py. The DB is the source of truth for
 the dashboard; CSVs are regenerable and stay gitignored.
@@ -88,7 +92,12 @@ def _to_float(v: object) -> Optional[float]:
         return None
 
 
-def ingest(csv_path: Path, label: Optional[str], force: bool) -> int:
+def ingest(
+    csv_path: Path,
+    label: Optional[str],
+    force: bool,
+    custom_only: bool = False,
+) -> int:
     meta_path = csv_path.with_suffix(".meta")
     if not csv_path.exists():
         print(f"error: CSV not found: {csv_path}", file=sys.stderr)
@@ -140,6 +149,7 @@ def ingest(csv_path: Path, label: Optional[str], force: bool) -> int:
         timed_iters=timed,
         tol=tol,
         sweep_sizes=sweep_sizes,
+        custom_only=custom_only,
     )
 
     # CSV schema (Phase 2G):
@@ -158,10 +168,17 @@ def ingest(csv_path: Path, label: Optional[str], force: bool) -> int:
     # (harness overhead is not kernel performance). We read them with .get()
     # so old CSVs still ingest; new CSVs write NULL.
     required = [
-        "arch", "dtype", "N", "kernel_name", "kernel_desc",
-        "kernel_min_ns", "kernel_median_ns",
-        "ref_kernel_min_ns", "ref_kernel_median_ns",
-        "max_abs_err", "max_rel_err",
+        "arch",
+        "dtype",
+        "N",
+        "kernel_name",
+        "kernel_desc",
+        "kernel_min_ns",
+        "kernel_median_ns",
+        "ref_kernel_min_ns",
+        "ref_kernel_median_ns",
+        "max_abs_err",
+        "max_rel_err",
     ]
     n_rows = 0
     with csv_path.open(newline="") as f:
@@ -169,11 +186,11 @@ def ingest(csv_path: Path, label: Optional[str], force: bool) -> int:
         fieldnames = reader.fieldnames or []
         missing = [c for c in required if c not in fieldnames]
         if missing:
-            print(
-                f"error: CSV missing columns: {missing}", file=sys.stderr
-            )
+            print(f"error: CSV missing columns: {missing}", file=sys.stderr)
             return 2
         for row in reader:
+            if custom_only and row["kernel_name"] == "cublas":
+                continue
             db.insert_measurement(
                 conn,
                 run_id,
@@ -231,8 +248,13 @@ def main() -> int:
         action="store_true",
         help="re-ingest even if (csv, meta, sha) already present",
     )
+    ap.add_argument(
+        "--custom-only",
+        action="store_true",
+        help="skip explicit cuBLAS rows; retain reference fields on custom rows",
+    )
     args = ap.parse_args()
-    return ingest(args.csv, args.label, args.force)
+    return ingest(args.csv, args.label, args.force, args.custom_only)
 
 
 if __name__ == "__main__":

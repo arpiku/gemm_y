@@ -28,6 +28,7 @@
 18. Reproducible benchmarks: clock locking (`bench.sh`)
 19. Statistical rigor: 95% CI for the median + p95 + std
 20. Visualization methodology: dashboard views
+21. Custom-only ingestion and focused kernel smoke tests
 
 ---
 
@@ -376,6 +377,15 @@ loop (K × S × kTimed extra launches) — a harness perf bug, not a kernel
 bug. After R3, the cuBLAS row is simply the first row per N in
 `SweepResult`; subsequent kernel rows reference its `kernel_min_ns` /
 `kernel_median_ns`.
+
+### Focused kernel smoke validation
+
+New kernel experiments have a separate `kernel_smoke` executable. It uses
+`Profiler<T>` and the same cuBLAS reference and accuracy gate as the full
+runner, but registers only active kernels and sweeps `{32, 96, 128}`. The
+executable checks both the expected row count and the presence of every
+registered kernel at every size; a missing or failed custom row is a failure,
+not a successful partial run.
 
 ---
 
@@ -993,8 +1003,10 @@ to interpret the result. Switch a family to a descriptive name
 competitive.
 
 `NaiveGemm<T>` stays as the permanent sanity baseline — it is not `k0`.
-The first custom kernel (`k0`) is a distinct struct, registered
-alongside `NaiveGemm` in `main.cpp`.
+Current sm120 bf16 experiments are independently named `k0_ldg` and
+`k0_coalesced`, registered alongside `NaiveGemm` in `main.cpp`. The family
+name remains an experiment identity; the registered name and description must
+identify the actual strategy.
 
 ### Rationale
 
@@ -1029,6 +1041,10 @@ alongside `NaiveGemm` in `main.cpp`.
   new header (`gemm_bf16.cuh`) needs an include there if direct kernel tests
   are later desired. The Profiler-level sweep remains the primary accuracy
   gate.
+- `tests/kernel_smoke.cu` is a separate focused executable for current
+  sm120 bf16 kernels. Build it with
+  `cmake --build build --target kernel_smoke -j` and run
+  `./build/kernel_smoke` before the full `test_cuda` suite.
 
 ---
 
@@ -1354,3 +1370,24 @@ and removed after manual review. The raw-sample `samples` table and
 `insert_sample`/`fetch_samples` infrastructure remain (storage is cheap
 and may support future views), but `fetch_samples_for_n` was deleted with
 the Distribution tab.
+
+---
+
+## 21. Custom-only ingestion and focused kernel smoke tests
+
+### Decision
+
+Experiment CSVs may be ingested with
+`python scripts/ingest.py <csv> --custom-only --label <label>`. This omits
+explicit cuBLAS measurement rows while retaining each custom row's embedded
+`ref_kernel_*` statistics. The run records `custom_only=1`; complete historical
+runs retain `custom_only=0` and their explicit cuBLAS rows.
+
+Dashboard queries use the embedded reference median and statistics for custom
+rows, falling back to the same-run cuBLAS row for older complete runs. No
+synthetic cuBLAS measurement is inserted for a custom-only run.
+
+The focused `kernel_smoke` executable registers only active new kernels,
+executes a small boundary-sensitive size set, and fails if any expected row is
+missing. It is built and run before the full test suite; clock-locked benchmark
+commands remain a user-run operation because they require `sudo`.

@@ -7,10 +7,14 @@
 # failed kernels (rel_err > tol) are skipped at the Profiler level before
 # CSV write, so they never reach ingest. There is no `pass` column.
 # `is_cublas` is derived in Python at query time (kernel_name == 'cublas').
+# Custom rows carry their cuBLAS reference statistics; query helpers use those
+# fields and fall back to same-run cuBLAS rows for older complete runs.
 #
 # Schema evolution:
 #   - Phase 2E: h2d_ns/d2h_ns are nullable (old runs keep them; new runs
 #     write NULL — harness overhead is not kernel performance). Added
+#   - Custom-only runs set runs.custom_only=1 and omit explicit cuBLAS rows.
+#     Existing runs default to 0 through migration. Added
 #     kernel_std_ns, kernel_p95_ns, kernel_ci_low_ns, kernel_ci_high_ns
 #     and ref_* equivalents. _migrate() adds columns idempotently for
 #     pre-existing DBs.
@@ -37,7 +41,8 @@ CREATE TABLE IF NOT EXISTS runs (
     warmup_iters INTEGER,
     timed_iters  INTEGER,
     tol          REAL,
-    sweep_sizes  TEXT
+    sweep_sizes TEXT,
+    custom_only  INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS measurements (
     run_id               INTEGER NOT NULL,
@@ -83,6 +88,9 @@ _MIGRATION_COLUMNS = [
     "ref_kernel_ci_high_ns",
 ]
 
+# Columns added for runs that intentionally omit explicit cuBLAS rows.
+_RUN_MIGRATION_COLUMNS = ["custom_only"]
+
 
 def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     """Open a connection and ensure the schema exists."""
@@ -104,6 +112,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for col in _MIGRATION_COLUMNS:
         try:
             conn.execute(f"ALTER TABLE measurements ADD COLUMN {col} REAL")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+    for col in _RUN_MIGRATION_COLUMNS:
+        try:
+            conn.execute(
+                f"ALTER TABLE runs ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"
+            )
         except sqlite3.OperationalError:
             pass  # column already exists
     conn.commit()
@@ -139,6 +154,7 @@ def insert_run(
     timed_iters: Optional[int],
     tol: Optional[float],
     sweep_sizes: Optional[str],
+    custom_only: bool = False,
 ) -> int:
     """Insert a run row and return its id."""
     with cursor(conn) as cur:
@@ -147,13 +163,22 @@ def insert_run(
             INSERT INTO runs (
                 ingested_at, git_sha, label, arch, dtype,
                 source_csv, source_meta,
-                warmup_iters, timed_iters, tol, sweep_sizes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                warmup_iters, timed_iters, tol, sweep_sizes, custom_only
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                ingested_at, git_sha, label, arch, dtype,
-                source_csv, source_meta,
-                warmup_iters, timed_iters, tol, sweep_sizes,
+                ingested_at,
+                git_sha,
+                label,
+                arch,
+                dtype,
+                source_csv,
+                source_meta,
+                warmup_iters,
+                timed_iters,
+                tol,
+                sweep_sizes,
+                int(custom_only),
             ),
         )
         conn.commit()
@@ -199,14 +224,26 @@ def insert_measurement(
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                run_id, n, kernel_name, kernel_desc,
-                h2d_ns, kernel_min_ns, kernel_median_ns, d2h_ns,
-                kernel_std_ns, kernel_p95_ns,
-                kernel_ci_low_ns, kernel_ci_high_ns,
-                ref_kernel_min_ns, ref_kernel_median_ns,
-                ref_kernel_std_ns, ref_kernel_p95_ns,
-                ref_kernel_ci_low_ns, ref_kernel_ci_high_ns,
-                max_abs_err, max_rel_err,
+                run_id,
+                n,
+                kernel_name,
+                kernel_desc,
+                h2d_ns,
+                kernel_min_ns,
+                kernel_median_ns,
+                d2h_ns,
+                kernel_std_ns,
+                kernel_p95_ns,
+                kernel_ci_low_ns,
+                kernel_ci_high_ns,
+                ref_kernel_min_ns,
+                ref_kernel_median_ns,
+                ref_kernel_std_ns,
+                ref_kernel_p95_ns,
+                ref_kernel_ci_low_ns,
+                ref_kernel_ci_high_ns,
+                max_abs_err,
+                max_rel_err,
             ),
         )
     conn.commit()
@@ -240,6 +277,7 @@ def list_runs(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             SELECT r.id, r.ingested_at, r.git_sha, r.label,
                    r.arch, r.dtype, r.source_csv, r.source_meta,
                    r.warmup_iters, r.timed_iters, r.tol, r.sweep_sizes,
+                   r.custom_only,
                    (SELECT COUNT(*) FROM measurements m WHERE m.run_id = r.id)
                        AS kernel_count
               FROM runs r
@@ -277,12 +315,13 @@ def fetch_measurements(
     query = f"""
         SELECT {_MEASUREMENT_COLUMNS},
                r.ingested_at, r.git_sha, r.label, r.arch, r.dtype,
-               r.tol, r.warmup_iters, r.timed_iters,
+               r.tol, r.warmup_iters, r.timed_iters, r.custom_only,
                CASE
                    WHEN m.kernel_name = 'cublas' THEN NULL
                    ELSE (
-                       (ref.kernel_median_ns - m.kernel_median_ns)
-                       / NULLIF(ref.kernel_median_ns, 0) * 100.0
+                       (COALESCE(m.ref_kernel_median_ns, ref.kernel_median_ns)
+                        - m.kernel_median_ns)
+                       / NULLIF(COALESCE(m.ref_kernel_median_ns, ref.kernel_median_ns), 0) * 100.0
                    )
                END AS perf_pct
           FROM measurements m
@@ -317,15 +356,11 @@ def fetch_measurements(
         return [dict(row) for row in cur.fetchall()]
 
 
-def distinct(
-    conn: sqlite3.Connection, column: str, table: str = "runs"
-) -> list[str]:
+def distinct(conn: sqlite3.Connection, column: str, table: str = "runs") -> list[str]:
     """Distinct values of a column, sorted."""
     # column/table are internal, not user input — safe to interpolate.
     with cursor(conn) as cur:
-        cur.execute(
-            f"SELECT DISTINCT {column} FROM {table} ORDER BY {column}"
-        )
+        cur.execute(f"SELECT DISTINCT {column} FROM {table} ORDER BY {column}")
         return [row[0] for row in cur.fetchall()]
 
 
@@ -336,7 +371,7 @@ def measurements_with_perf_pct(
     """Measurements for a run, joined to the run's cuBLAS sibling at the
     same N, with `perf_pct` computed.
 
-    ``perf_pct = (cublas_median_ns - custom_median_ns) / cublas_median_ns * 100``
+    ``perf_pct = (ref_kernel_median_ns - custom_median_ns) / ref_kernel_median_ns * 100``
     (ARD §15). Positive = custom faster than cuBLAS.
 
     cuBLAS rows themselves get ``perf_pct = NULL`` (undefined for the
@@ -350,12 +385,13 @@ def measurements_with_perf_pct(
             f"""
             SELECT {_MEASUREMENT_COLUMNS},
                    r.ingested_at, r.git_sha, r.label, r.arch, r.dtype,
-                   r.tol, r.warmup_iters, r.timed_iters,
+                   r.tol, r.warmup_iters, r.timed_iters, r.custom_only,
                    CASE
                        WHEN m.kernel_name = 'cublas' THEN NULL
                        ELSE (
-                           (ref.kernel_median_ns - m.kernel_median_ns)
-                           / NULLIF(ref.kernel_median_ns, 0) * 100.0
+                           (COALESCE(m.ref_kernel_median_ns, ref.kernel_median_ns)
+                            - m.kernel_median_ns)
+                           / NULLIF(COALESCE(m.ref_kernel_median_ns, ref.kernel_median_ns), 0) * 100.0
                        )
                    END AS perf_pct
               FROM measurements m
@@ -387,11 +423,12 @@ def best_custom_perf_pct_at_n(
         cur.execute(
             """
             SELECT MAX(
-                (ref.kernel_median_ns - m.kernel_median_ns)
-                / NULLIF(ref.kernel_median_ns, 0) * 100.0
+                (COALESCE(m.ref_kernel_median_ns, ref.kernel_median_ns)
+                 - m.kernel_median_ns)
+                / NULLIF(COALESCE(m.ref_kernel_median_ns, ref.kernel_median_ns), 0) * 100.0
             ) AS best_perf_pct
               FROM measurements m
-              JOIN measurements ref
+              LEFT JOIN measurements ref
                    ON ref.run_id = m.run_id
                   AND ref.n = m.n
                   AND ref.kernel_name = 'cublas'

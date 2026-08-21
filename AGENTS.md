@@ -35,6 +35,8 @@ Not currently supported:
 
 ```sh
 cmake -B build
+cmake --build build --target kernel_smoke -j
+./build/kernel_smoke
 cmake --build build -j
 ctest --test-dir build
 ```
@@ -57,7 +59,10 @@ src/cublas/                  cuBLAS reference implementation
 src/sm90/                    Hopper kernels
 src/sm120/                   Blackwell kernels
 tests/test.cu                build and correctness smoke tests
+tests/kernel_smoke.cu        focused smoke test for new kernels
 scripts/                     benchmark ingestion and dashboard tools
+scripts/ingest.py            CSV/.meta ingestion, including custom-only runs
+scripts/db.py                SQLite schema and dashboard query layer
 ```
 
 CMake compiles only the selected architecture directory. New `.cu` files in that directory are discovered automatically.
@@ -119,17 +124,19 @@ The square sweep is:
 1024, 1536, 2048, 3072, 4096
 ```
 
-Each size runs cuBLAS and every registered custom kernel with warmups and timed CUDA-event samples. Reproducible benchmark runs must use:
+Each size runs cuBLAS and every registered custom kernel with warmups and timed CUDA-event samples. For quick validation, build and run `kernel_smoke` before the full suite; it checks only the kernels under active development at sizes `{32, 96, 128}`. Reproducible benchmark runs must use:
 
 ```sh
 sudo scripts/bench.sh
 ```
 
-Results are written to `results/` and can be ingested into the SQLite dashboard with the scripts under `scripts/`.
+Results are written to `results/` and can be ingested into the SQLite dashboard with the scripts under `scripts/`. For experiment runs that should not duplicate explicit cuBLAS rows, use `python scripts/ingest.py <csv> --custom-only --label <label>`; custom rows retain their embedded `ref_kernel_*` reference statistics.
+
+When validating code, the model must run the produced executable where practical, including `./build/kernel_smoke` after building it. Direct `./build/gemm_y` runs are suitable for quick checks only; reproducible performance claims require the clock-locked wrapper. Do not run commands requiring `sudo`; the user will run commands such as `sudo scripts/bench.sh`.
 
 ## Experiment workflow
 
-The current cleanup work is documentation-first. Do not change kernel behavior while documenting the optimization plan.
+The current workflow uses documentation-first contracts followed by isolated bf16 experiments. Change one kernel variable at a time, keep each candidate independently benchmarkable, and validate new kernels with `kernel_smoke` before the full suite or clock-locked benchmark.
 
 - Keep each kernel independently identifiable and benchmarkable.
 - Record tile shape, warp count, staging, layouts, and other relevant parameters in the kernel description.
