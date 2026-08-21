@@ -1391,3 +1391,59 @@ The focused `kernel_smoke` executable registers only active new kernels,
 executes a small boundary-sensitive size set, and fails if any expected row is
 missing. It is built and run before the full test suite; clock-locked benchmark
 commands remain a user-run operation because they require `sudo`.
+
+---
+
+## 22. Active kernels, offline tuning, and generated dispatch
+
+### Decision
+
+The full benchmark and tuning profile have separate registration roles. The
+full benchmark registers the generic baseline and active production candidates
+only. Completed kernels are removed from that list but remain in source,
+historical results, and focused smoke/regression coverage. Registration lists
+are explicit; lifecycle state is not represented by commented-out code or
+runtime flags.
+
+Compile-time kernel specializations are profiled independently by a dedicated
+tuning executable. The profile records accuracy-passing rows and CUDA-event
+timings in CSV and metadata. It does not write to SQLite. The user manually
+ingests selected results when they are worth preserving.
+
+An offline selector reads one architecture/dtype benchmark CSV and emits a
+deterministic generated C++ policy. The initial key is `(arch, dtype, N)` for
+the current square-GEMM scope. The selector compares candidates with the fixed
+fallback using `kernel_median_ns`, applies an improvement threshold, and emits
+the fallback for unsupported or insufficiently improved sizes.
+
+The production dispatcher is a thin compile-time switch over generated policy
+entries. It may call only known candidate functors and the deterministic
+fallback. It must not benchmark, synchronize for measurement, allocate, perform
+I/O, query SQLite, or use runtime string lookup. Generated policy validation
+must separately check selected candidate names, fallback behavior, numerical
+accuracy, and dispatcher timing before promotion to the full benchmark.
+
+The canonical name for `k1_t<64,64,16>` is `k1_t`; distinct names are required
+for distinct concrete specializations only. Future non-square support may extend
+the policy key to `(arch, dtype, M, N, K)`, but runtime shape generalization is
+out of scope until that contract changes.
+
+### Rationale
+
+Separating profile registration from production registration prevents every
+candidate experiment from expanding the normal benchmark and avoids stale
+candidate lists after a policy is selected. Offline selection preserves
+zero-overhead production dispatch and makes policy generation reproducible from
+an auditable CSV. Keeping the fallback explicit provides defined behavior for
+sizes absent from the profile or below the improvement threshold.
+
+### Consequences
+
+- Candidate implementations remain compiled because generated dispatch calls
+  them, even when they are not registered in `src/main.cpp`.
+- A generated policy is a build artifact and must not be hand-edited.
+- Candidate/profile CSVs and sidecar metadata are preserved for manual review;
+  `db/gemm_y.db` remains unchanged unless the user explicitly ingests data.
+- A policy can be regenerated for a different architecture, dtype, or threshold
+  without changing kernel source, but the generated header must be rebuilt and
+  validated as a separate artifact.

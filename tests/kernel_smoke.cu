@@ -21,7 +21,7 @@
 #error "kernel_smoke requires a supported CUDA architecture"
 #endif
 
-bool check_padded_k1_smem() {
+template <typename Kernel> bool check_padded_kernel(const char *label) {
   using T = gemm_y::dtypes::bf16;
   constexpr int M = 37;
   constexpr int N = 53;
@@ -62,7 +62,7 @@ bool check_padded_k1_smem() {
   gemm_y::MatrixView<T, gemm_y::Space::Device> dGotv(dGot.data(), M, N, ldC);
   gemm_y::CublasHandle handle;
   gemm_y::cublas_gemm(handle, dAv, dBv, dRefv);
-  gemm_y::k1_smem{}(gemm_y::GemmArgs<T>{dAv, dBv, dGotv}, nullptr);
+  Kernel{}(gemm_y::GemmArgs<T>{dAv, dBv, dGotv}, nullptr);
   CUDA_CHECK(cudaDeviceSynchronize());
   CUDA_CHECK(cudaMemcpy(hRef.data(), dRef.data(), hRef.bytes(),
                         cudaMemcpyDeviceToHost));
@@ -74,7 +74,7 @@ bool check_padded_k1_smem() {
   const gemm_y::MatrixView<const T, gemm_y::Space::Host> ref(hRef.data(), M, N,
                                                              ldC);
   const auto errors = gemm_y::compare<T>(got, ref);
-  std::printf("kernel smoke padded k1_smem: max_rel=%.3e\n", errors.max_rel);
+  std::printf("kernel smoke padded %s: max_rel=%.3e\n", label, errors.max_rel);
   return errors.max_rel <= gemm_y::kRelErrTol<T>();
 }
 
@@ -85,9 +85,10 @@ int main() {
   profiler.register_kernel<gemm_y::k0_ldg>();
   profiler.register_kernel<gemm_y::k0_coalesced>();
   profiler.register_kernel<gemm_y::k1_smem>();
+  profiler.register_kernel<gemm_y::k1_t<64, 64, 16>>();
 
   const gemm_y::SweepResult result = profiler.run_sweep(sizes);
-  constexpr std::size_t kExpectedRowsPerN = 4;
+  constexpr std::size_t kExpectedRowsPerN = 5;
   const std::size_t expected_rows = sizes.size() * kExpectedRowsPerN;
   if (result.rows.size() != expected_rows) {
     std::fprintf(stderr, "kernel smoke failed: expected %zu rows, got %zu\n",
@@ -100,6 +101,7 @@ int main() {
     bool has_ldg = false;
     bool has_coalesced = false;
     bool has_smem = false;
+    bool has_tiled = false;
     for (const auto &row : result.rows) {
       if (row.N != size)
         continue;
@@ -111,18 +113,22 @@ int main() {
         has_coalesced = true;
       if (row.kernel_name == "k1_smem")
         has_smem = true;
+      if (row.kernel_name == "k1_t")
+        has_tiled = true;
     }
-    if (!has_cublas || !has_ldg || !has_coalesced || !has_smem) {
+    if (!has_cublas || !has_ldg || !has_coalesced || !has_smem || !has_tiled) {
       std::fprintf(stderr,
                    "kernel smoke failed at N=%d: cublas=%d k0_ldg=%d "
-                   "k0_coalesced=%d k1_smem=%d\n",
-                   size, has_cublas, has_ldg, has_coalesced, has_smem);
+                   "k0_coalesced=%d k1_smem=%d k1_t=%d\n",
+                   size, has_cublas, has_ldg, has_coalesced, has_smem,
+                   has_tiled);
       return EXIT_FAILURE;
     }
   }
 
-  if (!check_padded_k1_smem()) {
-    std::fprintf(stderr, "kernel smoke failed: padded k1_smem mismatch\n");
+  if (!check_padded_kernel<gemm_y::k1_smem>("k1_smem") ||
+      !check_padded_kernel<gemm_y::k1_t<64, 64, 16>>("k1_t")) {
+    std::fprintf(stderr, "kernel smoke failed: padded kernel mismatch\n");
     return EXIT_FAILURE;
   }
 

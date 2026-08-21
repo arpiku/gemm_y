@@ -148,3 +148,21 @@ Full-benchmark registration and smoke/regression registration may differ. The fu
 - Do not commit changes or create branches unless explicitly requested.
 
 The active optimization workflow is documented by the kernel contract, explicit registration lists, focused smoke validation, and manual benchmark-result review.
+
+### Active and completed kernel lifecycle
+
+- The full benchmark registry contains only the generic baseline and currently active kernels.
+- Completed kernels may remain in source and in `kernel_smoke` as regression controls, but must be removed from the full benchmark registration list.
+- Do not delete completed kernel implementations or historical CSV/results solely because they are no longer active.
+- Registration lists must be explicit and reproducible; do not use commented-out registrations or runtime lifecycle flags.
+- Keep the active `k1_` family in the full benchmark until its replacement is validated and deliberately promoted.
+
+### Tuning and offline dispatch
+
+- Compile-time kernel candidates are independently benchmarkable functor specializations. Candidate registration belongs in a dedicated tuning/profile executable, not in `src/main.cpp` or the normal full benchmark.
+- A tuning profile must record accuracy-passing candidates and CUDA-event timing rows in CSV plus metadata. The database is never modified automatically; selected results are manually ingested by the user.
+- Dispatch selection is offline: a selector reads a benchmark CSV and emits a deterministic generated C++ policy. The initial policy key is `(arch, dtype, N)` because the project currently supports square GEMM only.
+- The production dispatcher must contain only compile-time candidate calls and a deterministic fallback. It must not benchmark, synchronize for measurement, allocate, perform file I/O, query SQLite, or use string-based runtime lookup.
+- Candidate names must be unique per concrete specialization. The canonical `k1_t<64,64,16>` name is `k1_t`; do not create a second benchmark identity for the same specialization.
+- Validate the generated policy separately from candidate correctness by checking selected names, fallback behavior, output accuracy, and dispatcher timing. Do not promote a dispatcher into the full benchmark until the profile and policy pass these checks.
+- Autotuning must remain architecture- and dtype-specific. A future extension may key by `(arch, dtype, M, N, K)` when non-square shapes are supported; do not add runtime shape generalization prematurely.
