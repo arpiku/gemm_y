@@ -121,8 +121,7 @@ void profile_bf16_kernels(const std::string &arch) {
 
   register_bf16_kernel<gemm_y::NaiveGemm<T>>(prof, kernels);
 #if defined(CUDA_ARCH_SM_120)
-  register_bf16_kernel<gemm_y::k0_ldg>(prof, kernels);
-  register_bf16_kernel<gemm_y::k0_coalesced>(prof, kernels);
+  register_bf16_kernel<gemm_y::k1_smem>(prof, kernels);
 #endif
 
   const gemm_y::SweepResult result = prof.run_sweep(kSweepSizes);

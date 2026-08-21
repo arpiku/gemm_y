@@ -42,4 +42,14 @@ struct k0_coalesced {
   void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
 };
 
+// k1_smem — single-buffered cooperative shared-memory tile.
+struct k1_smem {
+  static constexpr std::string_view name() { return "k1_smem"; }
+  static constexpr std::string_view description() {
+    return "bf16 shared-memory GEMM; 64x64x16 tile; 16x16 block; 4x4/thread; "
+           "single-buffered";
+  }
+  void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
+};
+
 } // namespace gemm_y

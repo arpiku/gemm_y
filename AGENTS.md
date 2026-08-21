@@ -138,6 +138,8 @@ When validating code, the model must run the produced executable where practical
 
 The current workflow uses documentation-first contracts followed by isolated bf16 experiments. Change one kernel variable at a time, keep each candidate independently benchmarkable, and validate new kernels with `kernel_smoke` before the full suite or clock-locked benchmark.
 
+Full-benchmark registration and smoke/regression registration may differ. The full benchmark explicitly lists the generic baseline and active experiments; completed kernels may be removed from that list while remaining in source, historical result storage, and the smoke test as regression controls. Registration lists must be explicit and reproducible; do not use commented-out registrations or runtime lifecycle flags.
+
 - Keep each kernel independently identifiable and benchmarkable.
 - Record tile shape, warp count, staging, layouts, and other relevant parameters in the kernel description.
 - Change one kernel variable at a time during later optimization work.
@@ -145,4 +147,4 @@ The current workflow uses documentation-first contracts followed by isolated bf1
 - Keep failed or slower experiments available for comparison; do not hide negative results.
 - Do not commit changes or create branches unless explicitly requested.
 
-Earlier work established the build system, architecture split, kernel/harness ABI, profiler, cuBLAS reference path, accuracy gate, and benchmark reporting. The current prologue work makes those contracts and the upcoming bf16 `k0` experiment workflow explicit before kernel implementation begins.
+The active optimization workflow is documented by the kernel contract, explicit registration lists, focused smoke validation, and manual benchmark-result review.
