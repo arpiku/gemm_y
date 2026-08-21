@@ -52,6 +52,16 @@ struct k1_smem {
   void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
 };
 
+// k1_t_x — isolated code-generation variant of k1_t<64, 64, 16>.
+struct k1_t_x {
+  static constexpr std::string_view name() { return "k1_t_x"; }
+  static constexpr std::string_view description() {
+    return "bf16 dynamic-smem GEMM; 64x64x16 tile; 16x16 block; "
+           "4x4/thread; single-buffered; unrolled FMA; shift-mask indexing";
+  }
+  void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
+};
+
 template <int TileM, int TileN, int TileK> struct k1_t {
   static_assert(TileM > 0 && TileN > 0 && TileK > 0,
                 "k1_t tile dimensions must be positive");

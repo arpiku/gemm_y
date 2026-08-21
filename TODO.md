@@ -1,11 +1,10 @@
-# TODO.md — Promoted `k1_` dispatch policy
+# TODO.md — Current production state and future tuning policy
 
-## Current state
+## Current production state
 
-- `k1_smem` is the fixed shared-memory comparison control and deterministic
-  dispatcher fallback.
-- The validated `sm_120/bf16` tuning profile selected a source-level policy for
-  the supported square sizes:
+- The promoted `sm_120/bf16` source dispatcher is `k1_dispatch` in
+  `src/sm120/k1_dispatch.cuh`.
+- Its current policy for the supported square benchmark sizes is:
 
   ```text
   32,64                    -> k1_t_32x64x16
@@ -15,86 +14,38 @@
   unsupported sizes        -> k1_smem
   ```
 
-- The user owns benchmark-result review and database ingestion. Development,
-  building, testing, and dispatching do not modify `db/gemm_y.db`.
-- The generated policy and one-off tuning workflow were temporary promotion
-  artifacts and have been removed after the policy was frozen in source.
+- `k1_smem` remains the comparison control and deterministic fallback.
+- Production registration contains `naive`, `k1_smem`, and `k1_dispatch`; the
+  individual tuned variants are not registered in the normal full benchmark.
+- Benchmark review and database ingestion are manual user actions. Development,
+  building, testing, and dispatching must not modify `db/gemm_y.db`.
 
-## 1. Permanent dispatcher
+## Completed `k1_t_x` reference experiment
 
-- [x] Add `src/sm120/k1_dispatch.cuh` with the validated explicit `switch (N)`.
-- [x] Keep the stable public name `k1_dispatch`.
-- [x] Call concrete compile-time `k1_t` specializations directly.
-- [x] Retain `k1_smem` as the deterministic unsupported-size fallback.
-- [x] Keep `selected_kernel_name(int)` as a constexpr inspection helper.
-- [x] Keep dispatch free of timing synchronization, allocation, I/O, SQLite,
-      and runtime string lookup.
-- [x] Keep candidate implementations independently available in source.
-
-## 2. Production registration
-
-- [x] Register `NaiveGemm`, `k1_smem`, and `k1_dispatch` in `src/main.cpp`.
-- [x] Remove direct production registration of individual tuned variants.
-- [x] Preserve explicit registration and metadata for the production CSV/meta
-      output.
-- [x] Keep completed k0 kernels available as smoke/regression controls without
-      rerunning them in the normal full benchmark.
-
-## 3. Tuning infrastructure cleanup
-
-- [x] Remove the generated-policy CMake command and build dependency.
-- [x] Remove the temporary `kernel_tuning`, `dispatch_check`, and
-      `k1_dispatch_profile` targets.
-- [x] Remove the temporary selector, profile/check sources, and fixture.
-- [x] Keep the concrete `k1_t` implementations and historical result artifacts.
-- [x] Keep the database untouched by this promotion.
-
-## 4. Production validation
-
-- [x] Update `kernel_smoke` to validate `k1_dispatch` at `{32, 96, 128}`.
-- [x] Keep k0 controls and `k1_smem` in smoke/regression coverage.
-- [x] Keep the padded-leading-dimension correctness check through the dispatcher.
-- [x] Check unsupported-size fallback through `selected_kernel_name(999)`.
-- [x] Build and run the production smoke target:
-
-  ```sh
-  cmake --build build --target kernel_smoke -j
-  ./build/kernel_smoke
-  ```
-
-- [x] Build the complete production tree and run CTest:
-
-  ```sh
-  cmake --build build -j
-  ctest --test-dir build --output-on-failure
-  ```
-
-## 5. User-run final benchmark and ingestion
-
-After the production validation above passes, run the reproducible benchmark as
-an ordinary user through the clock-locking wrapper:
-
-```sh
-sudo scripts/bench.sh ./build/gemm_y
-```
-
-Review that the generated `results/bench_sm_120_bf16.csv` and `.meta` contain:
-
-```text
-cublas, naive, k1_smem, k1_dispatch
-```
-
-The user may then manually ingest the selected production result. Use
-`--custom-only --kernel-name k1_dispatch` if only dispatcher rows are wanted, or
-`--custom-only` if both custom production kernels are wanted. Do not run `sudo`
-or perform ingestion automatically as part of development.
+- `src/sm120/gemm_bf16_k1_t_x.cu` preserves an independently identifiable
+  `k1_t_x` implementation based on the `64x64x16` `k1_t` configuration.
+- The experiment tested explicit `__fmaf_rn` accumulation, targeted loop
+  unrolling, and compile-time shift/mask indexing for power-of-two dimensions.
+- Focused CUDA-event timings showed no meaningful improvement over `k1_t`; the
+  candidate also used more registers. It is therefore retained for reference
+  only and is not part of the smoke registry, production registry, or dispatch
+  policy.
+- No `k1_t_x` promotion is pending. Future optimization work should begin from
+  the production dispatcher and change one kernel variable at a time.
 
 ## Future tuning policy
 
-- Recreate a small architecture-/dtype-specific profile only for a justified
-  future `k1_` optimization round.
-- Register each concrete candidate exactly once in that temporary profile,
-  collect accuracy-passing CUDA-event timings, select offline, materialize the
-  result in `k1_dispatch.cuh`, and remove the temporary tooling again.
-- Keep the policy key `(arch, dtype, N)` while GEMM supports only square shapes.
-  Do not introduce runtime shape generalization prematurely.
+- Recreate a small, purpose-built profile and offline selector only after a
+  kernel family or major optimization step is sound and tuning is justified.
+- The temporary workflow may be rewritten for the next kernel family rather
+  than maintained as a generic autotuning framework.
+- Candidate registration belongs only in the temporary tuning/profile
+  executable. It must collect accuracy-passing CUDA-event timings and must not
+  modify SQLite automatically.
+- Materialize a validated policy into committed source, then delete temporary
+  selectors, profile executables, generated headers, fixtures, and tuning-only
+  tests. Preserve historical benchmark results when useful.
+- Keep the policy key `(arch, dtype, N)` while GEMM supports only square shapes;
+  retain the raw-pointer and leading-dimension kernel ABI for future extension.
+- New or materially modified CUDA kernels must check launch errors. Do not add
+  unrelated error-checking cleanup to old kernels as part of future work.
