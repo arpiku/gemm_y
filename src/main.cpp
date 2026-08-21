@@ -75,6 +75,17 @@ std::string iso8601_now() {
     return std::string(buf);
 }
 
+// Register a kernel and capture the same identity metadata used by write_meta.
+template <typename K, typename T>
+void register_bf16_kernel(
+    gemm_y::Profiler<T>& profiler,
+    std::vector<std::pair<std::string, std::string>>& metadata) {
+    profiler.template register_kernel<K>();
+    metadata.emplace_back(
+        std::string(K::name()),
+        std::string(K::description()));
+}
+
 // Write a key=value `.meta` sidecar alongside the CSV. Parsed by
 // scripts/ingest.py. `|` separates kernel name and description (descriptions
 // may contain commas/spaces; `|` will not). Multiple `kernel=` lines, cuBLAS
@@ -115,12 +126,10 @@ void write_meta(const std::string& meta_path,
 void profile_bf16_kernels(const std::string& arch) {
     using T = gemm_y::dtypes::bf16;
     gemm_y::Profiler<T> prof;
+    std::vector<std::pair<std::string, std::string>> kernels;
 
-
-    // Register Test Kernels for profiling
-    prof.register_kernel<gemm_y::NaiveGemm<T>>();
-    prof.register_kernel<gemm_y::k0>();
-
+    register_bf16_kernel<gemm_y::NaiveGemm<T>>(prof, kernels);
+    register_bf16_kernel<gemm_y::k0>(prof, kernels);
 
     const gemm_y::SweepResult result = prof.run_sweep(kSweepSizes);
 
@@ -128,17 +137,6 @@ void profile_bf16_kernels(const std::string& arch) {
     const std::string out_meta = "results/bench_" + arch + "_bf16.meta";
     std::printf("gemm_y: arch=%s dtype=bf16  out=%s\n", arch.c_str(), out_csv.c_str());
     write_csv(result, out_csv);
-
-
-
-    std::vector<std::pair<std::string, std::string>> kernels;
-
-    kernels.emplace_back(std::string(gemm_y::NaiveGemm<T>::name()),
-                            std::string(gemm_y::NaiveGemm<T>::description()));
-    kernels.emplace_back(std::string(gemm_y::k0::name()),
-                            std::string(gemm_y::k0::description()));
-
-
     write_meta(out_meta, arch, "bf16", 20, 50, gemm_y::kRelErrTol<T>(), kernels);
     std::printf("gemm_y: done. %zu rows written to %s\n", result.rows.size(), out_csv.c_str());
 }

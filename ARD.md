@@ -48,18 +48,18 @@ runtime field. ~~`Layout` (`ColMajor` / `RowMajor`) is a compile-time
 enum tag.~~ **Phase 2D:** `Layout` is deleted. ColMajor is the only
 layout, enforced structurally by `Matrix::alloc` setting `ld = rows`.
 
-**`MatrixView` dual-use contract:** the type serves two roles:
+**`MatrixView` dual-use contract:** the type serves two host-side roles:
 
 1. **Host-side view** — `operator()(i,j)` (element access), converting
    ctor `MatrixView<T,S> -> MatrixView<const T,S>` (const-correctness).
    ~~`block(r,c,m,n)` (zero-copy sub-view), `is_contiguous()` (copy
    dispatch).~~ **Phase 2D:** `block()` and `is_contiguous()` are deleted
    (no strided buffers after per-`N` alloc; see §5 revised).
-2. **Kernel-side POD descriptor** — only `ptr`/`rows`/`cols`/`ld` are read
-   directly (`A.ptr[i + k*A.ld]`). The host methods are **not**
-   `__device__`-callable; kernels read fields directly. This is intentional:
-   the kernel knows its layout at compile time (ColMajor is the only
-   layout) and bypasses any runtime branch.
+2. **Harness POD descriptor** — the adapter reads only `ptr`/`rows`/`cols`/`ld`
+   (`A.ptr[i + k*A.ld]`) when unpacking arguments. These fields are copied
+   into the raw-pointer device-kernel launch; `MatrixView` itself is never
+   passed across the kernel boundary, and its host methods are not
+   `__device__`-callable.
 
 ### Alternatives considered
 
@@ -80,8 +80,10 @@ layout, enforced structurally by `Matrix::alloc` setting `ld = rows`.
 
 ### Consequences
 
-- Kernels take `MatrixView<T, Space::Device>` (or unpacked `ptr+rows+cols+ld`)
-  — never raw `T* + N`. Enforces `ld`-awareness from day 1.
+- The host-side functor adapter takes `GemmArgs<T>` and unpacks
+  `ptr`/`rows`/`cols`/`ld`; the device `__global__` kernel takes raw pointers
+  and runtime dimensions only. This keeps the kernel `ld`-aware without
+  coupling device code to `MatrixView` or the harness.
 - ~~Submatrix slicing (`block(r,c,m,n)`) is zero-copy: returns a view with
   unchanged `ld` and offset `ptr`. This is what lets the bench runner
   pre-allocate a single 4096×4096 buffer and feed submatrices to every
@@ -260,10 +262,13 @@ struct TiledGemm {
 };
 ```
 
-`Profiler::register_kernel<K>()` registers a **concrete specialization** as
-one independently measured kernel. For example,
-`TiledGemm<128, 128, 32, 8, 2>` and `TiledGemm<64, 64, 32, 4, 2>` are separate
-registry entries and must have unique names and descriptions.
+- `Profiler::register_kernel<K>()` registers a **concrete specialization** as
+  one independently measured kernel. For example,
+  `TiledGemm<128, 128, 32, 8, 2>` and `TiledGemm<64, 64, 32, 4, 2>` are separate
+  registry entries and must have unique names and descriptions.
+- Registration helpers should add the concrete type to the profiler and
+  append its `name()`/`description()` to metadata in the same operation. This
+  prevents benchmark entries and `.meta` entries from drifting apart.
 
 The current profiler is a variant benchmarker, not a runtime autotuner. A
 tuning search must register each candidate specialization separately so that
@@ -1014,6 +1019,8 @@ alongside `NaiveGemm` in `main.cpp`.
   registration in `main.cpp`. Zero CMake changes.
 - Adding a compile-time variant = an explicit instantiation in the `.cu` and
   registration of that concrete type. Its `name()` must be unique.
+- Registration and metadata should be added together through the shared
+  helper in `main.cpp`, preserving the profiler and `.meta` ordering.
 - Declaring a struct or template specialization in `gemm_bf16.cuh` without a
   matching `.cu` definition → link error on `operator()`. `KernelTraits_v`
   only validates the declaration, not the definition.

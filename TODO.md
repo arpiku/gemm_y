@@ -8,7 +8,7 @@ No kernel implementation changes are part of this task.
 
 ## 1. Document the current kernel boundary
 
-- [ ] Confirm the durable device-kernel contract in `AGENTS.md`:
+- [x] Confirm the durable device-kernel contract in `AGENTS.md`:
 
   ```cpp
   __global__ void kernel(
@@ -17,9 +17,9 @@ No kernel implementation changes are part of this task.
       int ldA, int ldB, int ldC);
   ```
 
-- [ ] Confirm that device kernels use raw pointers and dimensions only.
-- [ ] Confirm that `GemmArgs<T>` and `MatrixView` belong to the host-side harness adapter.
-- [ ] Confirm the ColMajor addressing convention:
+- [x] Confirm that device kernels use raw pointers and dimensions only.
+- [x] Confirm that `GemmArgs<T>` and `MatrixView` belong to the host-side harness adapter.
+- [x] Confirm the ColMajor addressing convention:
 
   ```text
   A(i,k) = A[i + k*ldA]
@@ -27,14 +27,14 @@ No kernel implementation changes are part of this task.
   C(i,j) = C[i + j*ldC]
   ```
 
-- [ ] Confirm that every kernel must fully overwrite `C`, support valid leading dimensions, and guard tile boundaries.
-- [ ] Do not modify `src/sm120/gemm_bf16_k0.cu` during this documentation task.
+- [x] Confirm that every kernel must fully overwrite `C`, support valid leading dimensions, and guard tile boundaries.
+- [x] Do not modify `src/sm120/gemm_bf16_k0.cu` during this documentation task.
 
 ## 2. Document kernel identity and file organization
 
 For each experiment:
 
-- [ ] Use one implementation file per kernel:
+- [x] Use one implementation file per kernel:
 
   ```text
   src/sm120/gemm_bf16_k0.cu
@@ -42,23 +42,23 @@ For each experiment:
   src/sm120/gemm_bf16_k2.cu
   ```
 
-- [ ] Keep the declaration and harness-facing metadata in:
+- [x] Keep the declaration and harness-facing metadata in:
 
   ```text
   src/sm120/gemm_bf16.cuh
   ```
 
-- [ ] Keep development names stable by kernel family: `k0`, `k1`, `k2`, etc.
-- [ ] Treat each compile-time specialization as a separately benchmarked variant.
-- [ ] Give every registered specialization a unique name, for example:
+- [x] Keep development names stable by kernel family: `k0`, `k1`, `k2`, etc.
+- [x] Treat each compile-time specialization as a separately benchmarked variant.
+- [x] Give every registered specialization a unique name, for example:
 
   ```text
   k0_64x64_k32_w4_s2
   k0_128x128_k32_w8_s2
   ```
 
-- [ ] Make `description()` identify the actual strategy and its important parameters.
-- [ ] Use descriptions in this form once implementation begins:
+- [x] Make `description()` identify the actual strategy and its important parameters.
+- [x] Use descriptions in this form once implementation begins:
 
   ```cpp
   static constexpr std::string_view description() {
@@ -67,20 +67,20 @@ For each experiment:
   }
   ```
 
-- [ ] Do not encode historical experiment labels or undocumented abbreviations in source comments or metadata.
+- [x] Do not encode historical experiment labels or undocumented abbreviations in source comments or metadata.
 
 ### Template and autotuning rules
 
-- [ ] Use templates for compile-time kernel configuration such as tile sizes,
+- [x] Use templates for compile-time kernel configuration such as tile sizes,
       warp count, K tile size, staging depth, layouts, or swizzles.
-- [ ] Keep runtime GEMM arguments (`M`, `N`, `K`, `ldA`, `ldB`, `ldC`) as kernel
+- [x] Keep runtime GEMM arguments (`M`, `N`, `K`, `ldA`, `ldB`, `ldC`) as kernel
       parameters; do not encode matrix dimensions in template parameters.
-- [ ] Keep registered functors default-constructible and stateless initially;
+- [x] Keep registered functors default-constructible and stateless initially;
       `Profiler::register_kernel<K>()` dispatches `K{}`.
-- [ ] Explicitly instantiate every registered specialization in its `.cu` file.
-- [ ] Benchmark each candidate specialization separately. Do not hide a tuning
+- [x] Explicitly instantiate every registered specialization in its `.cu` file.
+- [x] Benchmark each candidate specialization separately. Do not hide a tuning
       search inside one timed `operator()` call.
-- [ ] Keep the candidate matrix small to control CUDA compile time and binary
+- [x] Keep the candidate matrix small to control CUDA compile time and binary
       size.
 
 Example family declaration:
@@ -105,8 +105,8 @@ prof.register_kernel<gemm_y::k0>();
 
 The same kernels are separately listed for `.meta` output. Before adding more experiments:
 
-- [ ] Replace the duplicated registration and metadata code with one helper.
-- [ ] The helper must register the kernel and append its metadata together:
+- [x] Replace the duplicated registration and metadata code with one helper.
+- [x] The helper must register the kernel and append its metadata together:
 
   ```cpp
   template <typename K, typename T>
@@ -120,10 +120,10 @@ The same kernels are separately listed for `.meta` output. Before adding more ex
   }
   ```
 
-- [ ] Preserve registration order: cuBLAS reference, `naive`, then `k0` and later experiments.
-- [ ] Register concrete template specializations, not an unexpanded template family.
-- [ ] Ensure every registered kernel appears in the generated metadata with a unique name.
-- [ ] Do not change profiler timing, accuracy, or dispatch behavior as part of this cleanup.
+- [x] Preserve registration order: cuBLAS reference, `naive`, then `k0` and later experiments.
+- [x] Register concrete template specializations, not an unexpanded template family.
+- [x] Ensure every registered kernel appears in the generated metadata with a unique name.
+- [x] Do not change profiler timing, accuracy, or dispatch behavior as part of this cleanup.
 
 ## 4. Define the upcoming `k0` experiment record
 
@@ -197,10 +197,10 @@ No kernel benchmark is required for this documentation-only task. After the clea
 
 ## Completion criteria for this prologue
 
-- [ ] `AGENTS.md` states that the current work is documentation-first.
-- [ ] The raw-pointer device ABI and host adapter boundary are documented.
-- [ ] Per-kernel file organization and identity rules are documented.
-- [ ] Registration and metadata deduplication is specified.
-- [ ] The `k0` experiment record format is defined.
-- [ ] The post-cleanup implementation and validation loop is explicit.
-- [ ] No kernel implementation or behavior has been changed.
+- [x] `AGENTS.md` states that the current work is documentation-first.
+- [x] The raw-pointer device ABI and host adapter boundary are documented.
+- [x] Per-kernel file organization and identity rules are documented.
+- [x] Registration and metadata deduplication is specified.
+- [x] The `k0` experiment record format is defined.
+- [x] The post-cleanup implementation and validation loop is explicit.
+- [x] No kernel implementation or behavior has been changed.
