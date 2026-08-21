@@ -3,6 +3,7 @@ build/
 build_*/
 out/
 results/
+artifacts/
 
 # CMake
 CMakeCache.txt

@@ -29,6 +29,8 @@
 19. Statistical rigor: 95% CI for the median + p95 + std
 20. Visualization methodology: dashboard views
 21. Custom-only ingestion and focused kernel smoke tests
+22. Active kernels, one-off tuning, and source-level dispatch
+23. Remote GPU validation and architecture-specific execution
 
 ---
 
@@ -1457,3 +1459,64 @@ profile or below the improvement threshold.
   tuning and dispatch tooling must not modify `db/gemm_y.db` automatically.
 - Future tuning requires an explicit candidate manifest, an architecture-/dtype-
   specific profile, offline selection, source promotion, and cleanup again.
+
+---
+
+## 23. Remote GPU validation and architecture-specific execution
+
+### Decision
+
+Remote GPU validation is an SSH transport and artifact-collection workflow, not
+part of the production GEMM runtime. The first implementation connects to a
+manually launched pod and leaves pod lifecycle management to the user. It does
+not require RunPod API credentials and must not automatically stop or terminate
+a pod.
+
+The remote workspace is isolated per run:
+
+```text
+/workspace/gemm_y_remote/<run-id>/
+```
+
+Remote source packages must be task-specific allowlists rather than broad
+working-tree archives. The smoke package contains only:
+
+```text
+CMakeLists.txt
+src/
+tests/
+```
+
+Generated CMake state, Python environments, repository history, benchmark
+results, databases, references, and local artifacts are not remote build
+inputs. A local package-size limit and file-count report are required before a
+paid pod upload.
+
+The RTX 50-series `sm_120` target is not a `tcgen05.mma` target. RTX 5090 runs
+are limited to validating the harness, CUDA toolchain visibility, existing
+kernels, and artifact retrieval. A future tcgen05 experiment requires confirmed
+`sm_100` hardware and is intentionally limited to one base kernel. The primary
+optimization phase after that experiment is Hopper (`sm_90`).
+
+### Rationale
+
+The initial working-tree archive included a local Python environment and root
+CMake build state, making the upload unnecessarily large and increasing paid
+pod time before any test could run. An explicit source allowlist prevents local
+environment contamination and makes the remote build reproducible.
+
+Manual pod lifecycle control avoids embedding credentials and avoids accidental
+billing from automatic provisioning. Separating architecture validation from
+kernel development prevents unsupported `tcgen05` instructions from being
+mistakenly tested on `sm_120` hardware.
+
+### Consequences
+
+- Remote smoke and benchmark runs produce local logs, CSV/metadata files, and a
+  manifest; they do not modify `db/gemm_y.db` automatically.
+- SSH authentication remains local. Passphrases are never stored by the
+  harness; an SSH agent may unlock the key once for multiple SSH/SCP operations.
+- Source packaging, remote execution, and artifact retrieval can be tested in
+  progressively smaller and cheaper stages.
+- The harness can later serve Hopper and confirmed `sm_100` systems without
+  becoming a runtime dependency or autotuning framework.

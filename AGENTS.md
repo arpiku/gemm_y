@@ -8,7 +8,9 @@ Develop custom CUDA GEMM kernels that match or beat cuBLAS on:
 - Blackwell (`sm_120`, local development target)
 - `bf16`, `fp16`, and `tf32` storage with fp32 accumulation
 
-The current focus is bf16 optimization on `sm120`.
+The current primary focus is BF16 optimization on Hopper (`sm_90`). The local
+RTX 50-series `sm_120` target remains useful for existing CUDA-core/tensor-core
+kernels, but it does not support `tcgen05.mma`.
 
 ## Scope
 
@@ -48,7 +50,10 @@ cmake -B build -DGEMM_Y_CUDA_ARCH=sm_90
 cmake --build build -j
 ```
 
-The default architecture is `sm_120`. Do not commit `build/`, benchmark results, profiler reports, or `compile_commands.json`.
+The default architecture is `sm_120`. Do not commit `build/`, benchmark results,
+profiler reports, Python environments, remote-test artifacts, or
+`compile_commands.json`. Root-level generated CMake files and directories are
+also disposable and should not be included in remote source snapshots.
 
 ## Repository structure
 
@@ -60,8 +65,9 @@ src/sm90/                    Hopper kernels
 src/sm120/                   Blackwell kernels
 tests/test.cu                build and correctness smoke tests
 tests/kernel_smoke.cu        focused smoke test for new kernels
-scripts/                     benchmark ingestion and dashboard tools
+scripts/                     benchmark, ingestion, dashboard, and remote-test tools
 scripts/ingest.py            CSV/.meta ingestion, including custom-only runs
+scripts/remote_smoke.py      SSH harness for an already-running remote GPU pod
 scripts/db.py                SQLite schema and dashboard query layer
 ```
 
@@ -135,6 +141,26 @@ sudo scripts/bench.sh ./build/gemm_y
 Results are written to `results/` and can be ingested into the SQLite dashboard with the scripts under `scripts/`. For experiment runs that should not duplicate explicit cuBLAS rows, use `python scripts/ingest.py <csv> --custom-only --label <label>`; custom rows retain their embedded `ref_kernel_*` reference statistics.
 
 When validating code, the model must run the produced executable where practical, including `./build/kernel_smoke` after building it. Direct `./build/gemm_y` runs are suitable for quick checks only; reproducible performance claims require the clock-locked wrapper. Do not run commands requiring `sudo`; the user will run commands such as `sudo scripts/bench.sh`.
+
+### Remote GPU validation
+
+- `scripts/remote_smoke.py` connects only to an already-running pod over SSH;
+  it does not create or terminate RunPod instances.
+- The user launches and stops the pod manually. Never put RunPod API keys or
+  SSH private-key contents in the repository, logs, manifests, or commands.
+- An encrypted SSH key may be unlocked through the user's local SSH agent; the
+  harness must remain non-interactive for individual SSH/SCP operations.
+- Remote smoke runs use `/workspace/gemm_y_remote/<run-id>/` and must collect
+  toolchain, GPU, build, smoke, and manifest artifacts locally.
+- Remote source packages must use an explicit task-specific allowlist. For the
+  smoke build, include only `CMakeLists.txt`, `src/`, and `tests/`; do not upload
+  `pyenv/`, `CMakeFiles/`, `.git/`, `build/`, `results/`, `db/`, `refs/`, or
+  local artifact directories.
+- Report the package file count and size before any paid pod upload and abort
+  locally when it exceeds the configured safety limit.
+- RTX 50-series `sm_120` pods validate the harness and existing kernels only;
+  they must not be used to claim `tcgen05.mma` support. Use confirmed `sm_100`
+  hardware for the limited tcgen05 experiment.
 
 ## Experiment workflow
 

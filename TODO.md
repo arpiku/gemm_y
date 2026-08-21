@@ -17,6 +17,9 @@
   (`sm_90`) development.
 - The tcgen05 effort is limited to one base kernel and correctness/basic
   measurement. No k2 autotuning or Blackwell optimization program is planned.
+- The first remote upload was stopped after the broad working-tree archive
+  included local `pyenv/` and generated `CMakeFiles/`. Do not launch another
+  paid pod until the source package is reduced and checked locally.
 
 ## Remote environment
 
@@ -44,9 +47,9 @@
 
 ## 1. Implement the SSH smoke harness
 
-- [ ] Add one local entry point under `scripts/` for an already-running pod.
+- [x] Add one local entry point under `scripts/` for an already-running pod (`scripts/remote_smoke.py`).
       Do not add RunPod API lifecycle code in this first version.
-- [ ] Accept these inputs:
+- [x] Accept these inputs:
 
   ```text
   --host
@@ -58,35 +61,65 @@
   --timeout
   ```
 
-- [ ] Do not accept or store private-key contents. Use the supplied local SSH
+- [x] Do not accept or store private-key contents. Use the supplied local SSH
       identity-file path.
-- [ ] Use bounded SSH connection retries and a startup/connection timeout.
-- [ ] Use a temporary known-hosts file. Do not permanently modify the user's
+- [x] Use bounded SSH connection retries and a startup/connection timeout.
+- [x] Use a temporary known-hosts file. Do not permanently modify the user's
       SSH configuration.
-- [ ] Print the generated run ID and remote workspace immediately so a failed
+- [x] Print the generated run ID and remote workspace immediately so a failed
       local process can still be cleaned up manually.
+- [x] Force SSH and SCP to use the supplied identity with
+      `IdentitiesOnly=yes`; do not accidentally try unrelated local agent keys.
+- [x] Exclude local `artifacts/` output from the source archive.
+
+## 1A. Pre-smoke harness hardening
+
+- [x] Create the local run directory and initial manifest before any remote
+      operation so connection, workspace, upload, and extraction failures are
+      recorded as artifacts.
+- [x] Track the current stage explicitly:
+
+  ```text
+  connect, workspace, upload, extract, configure, build, smoke, retrieve
+  ```
+
+- [x] Update the manifest on every normal failure path with the failed stage,
+      exit code, timestamps, and any captured stderr. Never report a failed
+      connection or upload as an unrecorded return.
+- [x] Parse the remote compute capability and reject an architecture mismatch
+      before compiling:
+
+  ```text
+  --arch sm_120 requires compute capability 12.0
+  --arch sm_90  requires compute capability 9.0
+  ```
+
+- [x] Preserve the distinction between a kernel failure and artifact-retrieval
+      failure in the manifest and process exit status.
+- [x] Keep the pod running after all outcomes; cleanup remains a manual action.
 
 ## 2. Transfer an isolated source snapshot
 
-- [ ] Default to the current working tree so uncommitted kernel changes can be
+- [x] Default to the current working tree so uncommitted kernel changes can be
       tested.
-- [ ] Create a temporary archive locally and exclude:
+- [x] Create a temporary archive locally and exclude:
 
   ```text
   .git/
   build/
   results/
   db/
+  artifacts/
   compile_commands.json
   ```
 
-- [ ] Upload and extract the archive into a unique remote workspace:
+- [x] Upload and extract the archive into a unique remote workspace:
 
   ```text
   /workspace/gemm_y_remote/<run-id>/
   ```
 
-- [ ] Use this remote layout:
+- [x] Use this remote layout:
 
   ```text
   /workspace/gemm_y_remote/<run-id>/
@@ -96,10 +129,33 @@
   └── artifacts/
   ```
 
-- [ ] Run all build and test commands from `source/`; do not depend on a
+- [x] Run all build and test commands from `source/`; do not depend on a
       pre-existing checkout or stale remote build directory.
-- [ ] Remove only the harness-created run directory when explicitly requested;
-      do not delete unrelated files under `/workspace`.
+- [ ] If remote cleanup is added later, remove only the harness-created run
+      directory; never delete unrelated files under `/workspace`.
+
+## 2A. Minimal source packaging before the next pod
+
+- [ ] Add an explicit source-set option to `scripts/remote_smoke.py`; make
+      `smoke` the default and reserve `benchmark` for the later CSV workflow.
+- [ ] For the `smoke` source set, include only:
+
+  ```text
+  CMakeLists.txt
+  src/
+  tests/
+  ```
+
+- [ ] Do not include `pyenv/`, `CMakeFiles/`, root CMake-generated files,
+      `.git/`, `build/`, `results/`, `db/`, `refs/`, `artifacts/`, or unrelated
+      local environments.
+- [ ] Print the selected source set, file count, and compressed archive size
+      before any upload.
+- [ ] Add a local maximum archive-size safety check and abort before SSH/SCP
+      when the limit is exceeded.
+- [ ] Extend the dry run to assert that required entries are present and the
+      excluded environment/build entries are absent.
+- [ ] Test the minimal archive locally before launching another paid pod.
 
 ## 3. Run the first smoke test
 
@@ -138,7 +194,7 @@
 
 ## 4. Retrieve and describe artifacts
 
-- [ ] Copy the following back to the requested local artifact directory:
+- [x] Copy the following back to the requested local artifact directory:
 
   ```text
   nvidia-smi.txt
@@ -151,10 +207,10 @@
   manifest.json
   ```
 
-- [ ] Support CSV and `.meta` retrieval now, even though the first smoke test
+- [x] Support CSV and `.meta` retrieval now, even though the first smoke test
       is not required to produce them. The next harness milestone will use
       this path for benchmark data.
-- [ ] Generate a manifest containing at least:
+- [x] Generate a manifest for completed remote test stages containing at least:
 
   ```json
   {
@@ -175,17 +231,37 @@
   }
   ```
 
-- [ ] Do not include SSH private keys, API credentials, or sensitive
+- [x] Do not include SSH private keys, API credentials, or sensitive
       environment variables in logs or manifests.
-- [ ] Leave the pod running after successful or failed artifact retrieval;
+- [x] Leave the pod running after successful or failed artifact retrieval;
       pod shutdown is a manual user action.
+- [x] After hardening, ensure the manifest is also written when connection,
+      upload, extraction, or retrieval fails.
 
 ## 5. Validate harness behavior
 
-- [ ] Perform a local dry run covering argument parsing and archive exclusion.
+- [x] Perform a local dry run covering argument parsing and archive exclusion.
+- [x] Remove disposable local build/CMake/cache/remote-artifact outputs while
+      preserving source, historical results, database, references, and the
+      Python environment.
 - [ ] Run the remote toolchain-only command and verify SSH, `/workspace`, and
       artifact retrieval.
-- [ ] Run the complete remote `kernel_smoke` workflow on the RTX 5090.
+- [ ] Run the complete remote `kernel_smoke` workflow on the RTX 5090 using:
+
+  ```sh
+  python3 scripts/remote_smoke.py \
+      --host <pod-host> \
+      --port <pod-port> \
+      --user root \
+      --identity-file ~/.ssh/id_ed25519 \
+      --arch sm_120 \
+      --artifact-dir artifacts/remote_smoke \
+      --timeout 900
+  ```
+
+- [ ] Confirm the remote toolchain and GPU logs before interpreting the smoke
+      result; the RTX 5090 run validates the harness and existing kernels, not
+      `tcgen05.mma`.
 - [ ] Verify that build failures and smoke-test failures still download logs
       and produce a nonzero local exit status.
 - [ ] Verify that interrupted local execution does not falsely report success.
