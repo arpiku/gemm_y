@@ -12,7 +12,7 @@
 3.  Kernel abstraction: functors, not function pointers
 4.  Profiler: type-erased registry, cuBLAS implicit
 5.  Bench runner: ~~pre-alloc + submatrix slicing~~ per-N allocation
-5.5. cuBLAS handle: stateful context, per-call stream binding
+    5.5. cuBLAS handle: stateful context, per-call stream binding
 6.  Accuracy tolerance
 7.  Timing: `CudaTimer` (device) + inline `steady_clock` (host)
 8.  Arch-specific code: separate `.cu` files, no `#ifdef`
@@ -34,13 +34,14 @@
 ## 1. Memory model: ownership / shape / space, separated
 
 ### Decision
+
 Three orthogonal concerns are modeled by three types:
 
-| Type | Role | Ownership |
-|------|------|-----------|
-| `Buffer<T, Space>` | raw storage | owning (RAII) |
-| `MatrixView<T, Space>` | `{ptr, rows, cols, ld}` | non-owning |
-| `Matrix<T, Space>` | `Buffer` + shape | owning |
+| Type                   | Role                    | Ownership     |
+| ---------------------- | ----------------------- | ------------- |
+| `Buffer<T, Space>`     | raw storage             | owning (RAII) |
+| `MatrixView<T, Space>` | `{ptr, rows, cols, ld}` | non-owning    |
+| `Matrix<T, Space>`     | `Buffer` + shape        | owning        |
 
 `Space` (`Host` / `Device`) is a **compile-time** template/enum tag, not a
 runtime field. ~~`Layout` (`ColMajor` / `RowMajor`) is a compile-time
@@ -48,6 +49,7 @@ enum tag.~~ **Phase 2D:** `Layout` is deleted. ColMajor is the only
 layout, enforced structurally by `Matrix::alloc` setting `ld = rows`.
 
 **`MatrixView` dual-use contract:** the type serves two roles:
+
 1. **Host-side view** — `operator()(i,j)` (element access), converting
    ctor `MatrixView<T,S> -> MatrixView<const T,S>` (const-correctness).
    ~~`block(r,c,m,n)` (zero-copy sub-view), `is_contiguous()` (copy
@@ -60,6 +62,7 @@ layout, enforced structurally by `Matrix::alloc` setting `ld = rows`.
    layout) and bypasses any runtime branch.
 
 ### Alternatives considered
+
 - **Runtime memory-space tag**: rejected. Loses compile-time dispatch;
   risks calling `cudaMemcpy` on a host pointer from a device kernel
   with no compile error. The tag costs nothing (1 byte in the view) and
@@ -76,6 +79,7 @@ layout, enforced structurally by `Matrix::alloc` setting `ld = rows`.
   `Layout` tag + branches can be re-added in ~5 lines per call site.
 
 ### Consequences
+
 - Kernels take `MatrixView<T, Space::Device>` (or unpacked `ptr+rows+cols+ld`)
   — never raw `T* + N`. Enforces `ld`-awareness from day 1.
 - ~~Submatrix slicing (`block(r,c,m,n)`) is zero-copy: returns a view with
@@ -99,6 +103,7 @@ layout, enforced structurally by `Matrix::alloc` setting `ld = rows`.
 ## 2. Memcpy variant selection
 
 ### Decision
+
 - **Contiguous copies** (`ld == rows`): `cudaMemcpy` (sync).
 - ~~**Strided submatrix copies** (`ld > rows`): `cudaMemcpy2D`.~~
   **Phase 2D:** deleted. The bench runner allocates per-`N` (see §5
@@ -113,6 +118,7 @@ layout, enforced structurally by `Matrix::alloc` setting `ld = rows`.
   call site in `Profiler.cu`. No `copy_kind_v` dispatch needed.
 
 ### Rationale
+
 - Sync vs async (default stream + sync) are **identical perf** when there is no
   overlap with compute. Async only wins when H2D/kernel/D2H are pipelined on
   a non-default stream — which is a Phase 2 concern (tiled kernels with
@@ -123,6 +129,7 @@ layout, enforced structurally by `Matrix::alloc` setting `ld = rows`.
   sufficient.
 
 ### Validation
+
 `src/bench/microbench/memcpy_microbench.cu` measures all variants across the
 size sweep. Results recorded here once run:
 
@@ -153,6 +160,7 @@ representative — the bench runner uses contiguous `cudaMemcpy`
 exclusively). The contiguous + async variants remain.
 
 ### ~~Phase 1.5 correction — revert to sync~~
+
 ~~The Phase 1 implementation used `cudaMemcpyAsync` + `cudaStreamSynchronize`
 on the default stream, believing this was forward-compatible with Phase 2
 explicit streams. **This was wrong**: `cudaMemcpyAsync` on pageable host
@@ -177,6 +185,7 @@ deferred to Phase 2 prep (pinned host buffers + explicit stream).
 ## 3. Kernel abstraction: functors, not function pointers
 
 ### Decision
+
 Every GEMM kernel is a **functor type** satisfying `KernelTraits`:
 
 ```cpp
@@ -232,30 +241,69 @@ void NaiveGemm<T>::operator()(GemmArgs<T> args, cudaStream_t stream) const {
 
 `MatrixView` is **not passed across the kernel boundary**. `GemmArgs<T>` is
 the harness ABI (what `Profiler` and `register_kernel<K>` see); raw pointers
-+ dimension ints are the device kernel ABI. This decouples kernel authoring
-from the harness's view type.
+
+- dimension ints are the device kernel ABI. This decouples kernel authoring
+  from the harness's view type.
+
+#### Compile-time kernel variants and autotuning
+
+Kernel functors may be class templates when compile-time configuration is
+useful. Tile sizes, warp count, K tile size, staging depth, layouts, and other
+launch or instruction parameters should be encoded in the type:
+
+```cpp
+template<int TileM, int TileN, int TileK, int Warps, int Stages>
+struct TiledGemm {
+    static constexpr std::string_view name();
+    static constexpr std::string_view description();
+    void operator()(GemmArgs<__nv_bfloat16>, cudaStream_t) const;
+};
+```
+
+`Profiler::register_kernel<K>()` registers a **concrete specialization** as
+one independently measured kernel. For example,
+`TiledGemm<128, 128, 32, 8, 2>` and `TiledGemm<64, 64, 32, 4, 2>` are separate
+registry entries and must have unique names and descriptions.
+
+The current profiler is a variant benchmarker, not a runtime autotuner. A
+tuning search must register each candidate specialization separately so that
+each candidate receives independent timing, accuracy, CSV, and metadata rows.
+A future runtime selection layer may choose among accepted candidates, but it
+must remain outside `Profiler::run_sweep()` and must not combine multiple
+configurations inside one timed `operator()` call.
+
+Template definitions remain in the architecture-specific `.cu` file. Every
+registered specialization must be explicitly instantiated there, or otherwise
+have a definition visible to the translation unit that uses it.
 
 ### Alternatives considered
+
 - **Raw function pointers** (`void(*)(T*,T*,T*,int,int,int)`): rejected.
-  - Loses metadata (`name`, `description`) needed for CSV/plotter labels.
-  - No room for compile-time config (tile size, warp count) without runtime args.
-  - Cannot carry state if a kernel later needs precomputed params.
+  - Lose metadata (`name`, `description`) needed for CSV/dashboard labels.
+  - Do not naturally carry the compile-time configuration associated with a
+    concrete kernel variant.
+  - Do not provide a suitable place for future kernel-specific adapter state.
 - **Virtual base class** (`IGemm`): rejected. vtable dispatch (~2 ns) is
   negligible vs kernel launch (~5 µs), but adds a header, a vtable indirection,
   and forces heap allocation for stateful kernels. No upside over functors.
-- **Type-erased `std::function` everywhere**: rejected as the *primary* API.
+- **Type-erased `std::function` everywhere**: rejected as the _primary_ API.
   Used internally by `Profiler` for storage (see §4), but the user-facing
   registration API is templated on the functor type — preserving inlining and
   SBO for stateless kernels.
 
 ### Consequences
-- `Profiler::register_kernel<K>()` type-erases into `std::function` once, at
-  registration. Stateless `K` (the common case) fits SBO — zero heap.
-  Stateful `K` exceeding SBO pays one heap alloc at registration, amortized
-  over the entire sweep. Negligible vs launch cost.
+
+- `Profiler::register_kernel<K>()` type-erases the concrete specialization
+  into `std::function`. The current registry invokes `K{}` for each dispatch,
+  so registered functors must be default-constructible and should remain
+  stateless; compile-time configuration is the intended model.
+- If runtime kernel state is required later, the registry must be changed to
+  retain or capture a kernel instance. That is a separate design change, not
+  part of compile-time variant registration.
 - `description()` is the design-info channel ("wmma 16×16×16", "tiled 128×128
-  8-warps"). Flows: kernel → `Profiler` → CSV → `plot.py` line labels.
-- Compile-time config (e.g. `TiledGemm<128,8>`) is natural via template params.
+  8-warps"). Flows: kernel → `Profiler` → CSV → dashboard labels.
+- Compile-time config (e.g. `TiledGemm<128, 128, 32, 8, 2>`) is natural via
+  template parameters.
 - Future extension to `alpha`/`beta` is non-breaking: add fields to `GemmArgs`
   with defaults; existing kernels ignore them.
 
@@ -264,6 +312,7 @@ from the harness's view type.
 ## 4. Profiler: type-erased registry, cuBLAS implicit
 
 ### Decision
+
 ```cpp
 template <typename T>
 class Profiler {
@@ -283,6 +332,7 @@ cuBLAS is **not** registered as a kernel — it is the implicit reference, run
 first per `N`, cached on device, and used as the accuracy ground truth.
 
 ### Rationale
+
 - cuBLAS is the success metric (AGENTS.md); treating it as just-another-kernel
   would either (a) recompute it per kernel-under-test (waste) or (b) require
   special-casing anyway. Making it implicit is cleaner.
@@ -292,14 +342,16 @@ first per `N`, cached on device, and used as the accuracy ground truth.
   are Phase 2+ and get their own `Profiler` instance in `main.cpp`.
 
 ### Overhead analysis
+
 - `std::function` indirect call: ~1 ns. Kernel launch: ~5 µs. Kernel runtime:
   µs–ms. Indirection is ~0.02% of launch overhead, ~0.0001% of total. Not a
   perf concern; do not optimize prematurely.
-- SBO (small-buffer optimization) in libstdc++/libc++ is 16–24 bytes — enough
-  for any stateless functor. Stateful functors exceeding SBO pay one heap
-  alloc at `register_kernel` time, amortized across the full sweep.
+- Compile-time variants add compile time and binary size for every explicit
+  specialization. Keep the tuning matrix deliberately small and change one
+  configuration variable at a time.
 
 ### Phase 1.5 decoupling — `run_sweep` returns `SweepResult`
+
 Phase 1 coupled benchmarking and serialization: `run_sweep(sizes, csv_path)`
 opened a `CsvWriter` internally and wrote rows as it ran. This conflated
 GPU work with I/O side effects, made `run_sweep` untestable in isolation,
@@ -325,6 +377,7 @@ bug. After R3, the cuBLAS row is simply the first row per N in
 ## 5. Bench runner: ~~pre-alloc + submatrix slicing~~ per-N allocation
 
 ### Decision (Phase 2D — per-N allocation)
+
 - Per `N` in the sweep: allocate `Matrix<T,Device>` for A, B, C, C_ref
   (×4), sized `N×N`. RAII — constructed and destroyed per iteration, no
   manual `cudaFree`.
@@ -338,6 +391,7 @@ bug. After R3, the cuBLAS row is simply the first row per N in
   layout — apples-to-apples, no strided-penalty on either side.
 
 ### Rationale (Phase 2D)
+
 - **`ld == N` is the point.** A kernel author writing a 128×128 tiled TC
   kernel for `N=128` can now exercise the `ld == N` fast path. Under the
   pre-alloc strategy, every kernel ran on `ld=4096` regardless of `N`, so
@@ -355,12 +409,14 @@ bug. After R3, the cuBLAS row is simply the first row per N in
   `lda/b/c`, so no special path. Apples-to-apples comparison.
 
 ### ~~Decision (Phase 1 — pre-alloc + submatrix slicing)~~
+
 ~~Pre-allocate 4096×4096 `Matrix<T,Device>` for A, B, C_max, C_ref_max (×4).~~
 ~~Pre-allocate 4096×4096 `Matrix<T,Host>` for H2D source + D2H sink.~~
 ~~Fill host A, B with deterministic pattern; `copy_h2d` once.~~
 ~~Per `N`: build sub-views via `block(0,0,N,N)` (ld=4096), feed to kernels.~~
 
 ### ~~Rationale (Phase 1)~~
+
 - ~~**Memory**: 4 × 4096² × 2 bytes (bf16) = 128 MB device + 96 MB host.~~
   Trivial on RTX 5070 (12 GB) and H100 (80 GB).
 - ~~**Four separate allocations, not aliased**: A, B, C_max, C_ref_max are~~
@@ -378,6 +434,7 @@ bug. After R3, the cuBLAS row is simply the first row per N in
   `lda/b/c`, so no special path. Apples-to-apples comparison.
 
 ### 5.1 C_ref storage: device global memory (VRAM), not host RAM
+
 - `C_ref` lives in **device global memory** for the duration of one `N`'s
   iteration (allocated per-`N` in Phase 2D; was a 4096² pre-alloc block
   in Phase 1).
@@ -399,6 +456,7 @@ bug. After R3, the cuBLAS row is simply the first row per N in
   device copy is the source of truth; host copy is for the comparator only.
 
 ### Iteration policy
+
 - Warmup: **20 launches**, untimed. Covers GPU boost-clock stabilization
   (5–10 launches for small kernels) and thermal steady state for large
   kernels (~15–20). Below 10 risks measuring a cold-clock kernel.
@@ -414,9 +472,11 @@ bug. After R3, the cuBLAS row is simply the first row per N in
   validate the §2 memcpy decision.
 
 ### CSV schema
+
 ```
 arch,dtype,N,kernel_name,kernel_desc,h2d_ns,kernel_min_ns,kernel_median_ns,d2h_ns,ref_kernel_min_ns,ref_kernel_median_ns,max_abs_err,max_rel_err
 ```
+
 - `kernel_desc` carries design info (see §3) → plotter labels lines with it.
 - `ref_kernel_min_ns` / `ref_kernel_median_ns` are cuBLAS time at the same
   `N` — lets `plot.py` draw the goal line per-kernel without a separate
@@ -433,6 +493,7 @@ arch,dtype,N,kernel_name,kernel_desc,h2d_ns,kernel_min_ns,kernel_median_ns,d2h_n
 ## 5.5. cuBLAS handle: stateful context, per-call stream binding
 
 ### Decision
+
 - `CublasHandle` is RAII-owned by `Profiler<T>` (one handle per Profiler,
   not a process singleton). Created in ctor, destroyed in dtor.
 - **One-time setup in ctor**:
@@ -443,6 +504,7 @@ arch,dtype,N,kernel_name,kernel_desc,h2d_ns,kernel_min_ns,kernel_median_ns,d2h_n
   - `cublasGemmEx(...)` with `alpha=1.0f`, `beta=0.0f` passed by address.
 
 ### Rationale
+
 - The handle is a **stateful context** (workspace, math mode, pointer mode),
   not a connection or a stream. Setup once; reuse across all calls.
 - **Per-call stream binding** (not handle-bound): lets Phase 2 async
@@ -466,8 +528,9 @@ arch,dtype,N,kernel_name,kernel_desc,h2d_ns,kernel_min_ns,kernel_median_ns,d2h_n
 ## 6. Accuracy tolerance
 
 ### Decision
+
 - Per-dtype compile-time constant: `template <typename T> constexpr
-  double kRelErrTol<T>()` in `src/bench/Accuracy.h`.
+double kRelErrTol<T>()` in `src/bench/Accuracy.h`.
 - **Failed kernels are skipped at the Profiler level**: if
   `err.max_rel > kRelErrTol<T>`, the row is not written to the CSV and a
   stderr FAIL message is printed (N, kernel name, rel_err, tol). Timing
@@ -475,13 +538,14 @@ arch,dtype,N,kernel_name,kernel_desc,h2d_ns,kernel_min_ns,kernel_median_ns,d2h_n
   pollute the dashboard. The cuBLAS reference row is always written
   (ground truth, err == 0).
 
-| Dtype | Storage | Compute | Hardware | Tolerance |
-|-------|---------|---------|----------|-----------|
-| `bf16`   | `__nv_bfloat16` | fp32 accum, tensor cores | TC | 1e-2 |
-| `fp16`   | `__half`        | fp32 accum, tensor cores | TC | 1e-3 |
-| `tfloat` | `float`         | tf32, tensor cores       | TC | 1e-3 |
+| Dtype    | Storage         | Compute                  | Hardware | Tolerance |
+| -------- | --------------- | ------------------------ | -------- | --------- |
+| `bf16`   | `__nv_bfloat16` | fp32 accum, tensor cores | TC       | 1e-2      |
+| `fp16`   | `__half`        | fp32 accum, tensor cores | TC       | 1e-3      |
+| `tfloat` | `float`         | tf32, tensor cores       | TC       | 1e-3      |
 
 ### Rationale
+
 - **bf16** (1e-2): bf16's 8-bit mantissa is the loosest of the three.
   Conservative — covers cuBLAS non-determinism across runs/streams
   without false negatives, while still catching real bugs (a broken
@@ -503,6 +567,7 @@ arch,dtype,N,kernel_name,kernel_desc,h2d_ns,kernel_min_ns,kernel_median_ns,d2h_n
 ## 7. Timing: `CudaTimer` (device) + inline `steady_clock` (host)
 
 ### Decision
+
 - `CudaTimer.h` (`cudaEvent_t` pair): device-side timing for H2D, kernel,
   D2H. RAII, move-only, ~20 lines. The only correct way to time device work.
 - Host sweep wall-time uses inline `std::chrono::steady_clock` — 3 lines
@@ -511,6 +576,7 @@ arch,dtype,N,kernel_name,kernel_desc,h2d_ns,kernel_min_ns,kernel_median_ns,d2h_n
   never for kernel timing.
 
 ### Rationale
+
 - Host `steady_clock` includes kernel launch latency (~5 µs) and any OS
   scheduling jitter. For a 32×32 bf16 kernel that runs in ~1 µs, this is
   5× noise — useless for kernel timing.
@@ -530,11 +596,13 @@ arch,dtype,N,kernel_name,kernel_desc,h2d_ns,kernel_min_ns,kernel_median_ns,d2h_n
 ## 8. Arch-specific code: separate `.cu` files, no `#ifdef`
 
 ### Decision
+
 - `src/sm90/*.cu` and `src/sm120/*.cu` are separate files.
 - CMake compiles only the directory matching `GEMM_Y_CUDA_ARCH`.
 - No `#ifdef CUDA_ARCH_SM_*` branches in kernel code.
 
 ### Rationale
+
 - AGENTS.md mandates one binary per arch, build-time selected.
 - `#ifdef` branches in a single file would (a) bloat the file, (b) make it
   impossible to compile-check the other arch locally, (c) encourage
@@ -548,10 +616,12 @@ arch,dtype,N,kernel_name,kernel_desc,h2d_ns,kernel_min_ns,kernel_median_ns,d2h_n
 ## 9. cuBLAS API choice: `cublasGemmEx` first
 
 ### Decision
+
 - Phase 1 reference: `cublasGemmEx` (the older, simpler API).
 - Phase 3+ goal post: `cublasLtMatmul` (the newer, lower-level API).
 
 ### Rationale
+
 - AGENTS.md explicitly sets this progression. `cublasGemmEx` is sufficient
   for a baseline reference; `cublasLtMatmul` exposes more knobs (tile
   selection, autotuning, epilogue fusion) that only matter once we're
@@ -567,14 +637,15 @@ arch,dtype,N,kernel_name,kernel_desc,h2d_ns,kernel_min_ns,kernel_median_ns,d2h_n
 `// tfloat = tf32 path (TC), not pedantic fp32 (CUDA cores).`
 
 **Mechanism:**
+
 - `CublasTypeMap<T>` gains a `static constexpr cublasMath_t math_mode`
   field per specialization:
-  - `bf16`   → `CUBLAS_DEFAULT_MATH`
-  - `fp16`   → `CUBLAS_DEFAULT_MATH`
+  - `bf16` → `CUBLAS_DEFAULT_MATH`
+  - `fp16` → `CUBLAS_DEFAULT_MATH`
   - `tfloat` → `CUBLAS_TF32_TENSOR_OP_MATH`
-  (Note: the enum constant in CUDA's `cublas_api.h` is
-  `CUBLAS_TF32_TENSOR_OP_MATH` (value 3); there is no
-  `CUBLAS_TF32_CUBLAS_MATH`.)
+    (Note: the enum constant in CUDA's `cublas_api.h` is
+    `CUBLAS_TF32_TENSOR_OP_MATH` (value 3); there is no
+    `CUBLAS_TF32_CUBLAS_MATH`.)
 - `cublas_gemm` wraps the `cublasGemmEx` call in a `CublasMathModeGuard`:
   ```cpp
   CublasMathModeGuard guard(handle.get(), TM::math_mode);
@@ -583,10 +654,11 @@ arch,dtype,N,kernel_name,kernel_desc,h2d_ns,kernel_min_ns,kernel_median_ns,d2h_n
   For bf16/fp16 this is a no-op (sets DEFAULT_MATH, restores DEFAULT_MATH).
   For tfloat it sets TF32_CUBLAS_MATH and restores DEFAULT_MATH.
 - **No distinct `cublas_gemm_tf32` entry point** — since there's no
-  pedantic path to distinguish from, `cublas_gemm<float>` *is* the tf32
+  pedantic path to distinguish from, `cublas_gemm<float>` _is_ the tf32
   path. The math mode is selected by `CublasTypeMap<T>::math_mode`.
 
 **`CublasMathModeGuard`** (free class in `src/cublas/CublasHandle.h`):
+
 - RAII: ctor captures prev mode via `cublasGetMathMode`, sets new mode;
   dtor restores prev mode. Non-copyable, non-movable.
 - Uses `cublasGetMathMode` (not a hardcoded DEFAULT_MATH restore) for
@@ -608,6 +680,7 @@ reference.
 ## 10. Phase 1 validation
 
 ### Exit criteria
+
 - `gemm_y` produces a well-formed CSV with cuBLAS + naive kernel rows across
   the full size sweep, all `max_rel_err ≤ 1e-2`.
 - `test_cuda` covers Buffer / MatrixView / CudaTimer / CublasHandle unit tests.
@@ -615,6 +688,7 @@ reference.
 - Cross-arch sanity: CSV produces on both sm_120 (RTX 5070) and sm_90 (H100).
 
 ### Results
+
 ```
 # Run: ./build/gemm_y  (RTX 5070, sm_120, CUDA 13.2, Release)
 # CSV: results/bench_sm_120_bf16.csv  (29 rows = 1 header + 14 sizes x 2 kernels)
@@ -651,30 +725,34 @@ reference.
 ## 11. Iteration policy: warmup / timed counts
 
 ### Decision
+
 - **Warmup: 20 launches** (untimed).
 - **Timed: 50 launches** — report **min** and **median**, never mean.
 - Uniform across all `N` for simplicity.
 
 ### Tradeoff analysis
 
-| Warmup / Timed | Pro | Con |
-|----------------|-----|-----|
-| 5 / 10  | Fast sweep | min of 10 noisy; median CI wide |
-| 20 / 50 | Stable min; tight median CI | ~5× longer sweep |
-| 50 / 100| Marginally better stats | Diminishing returns; large-N slow |
-| 100 / 1000 | Best stats | Large-N sweep takes minutes; no real gain |
+| Warmup / Timed | Pro                         | Con                                       |
+| -------------- | --------------------------- | ----------------------------------------- |
+| 5 / 10         | Fast sweep                  | min of 10 noisy; median CI wide           |
+| 20 / 50        | Stable min; tight median CI | ~5× longer sweep                          |
+| 50 / 100       | Marginally better stats     | Diminishing returns; large-N slow         |
+| 100 / 1000     | Best stats                  | Large-N sweep takes minutes; no real gain |
 
 ### Why 20 warmup
+
 - GPU boost clock stabilizes in 5–10 launches for small kernels.
 - Large kernels may trigger thermal throttle; need ~15–20 to reach steady state.
 - 20 covers both regimes with margin. Below 10 risks measuring a cold-clock kernel.
 
 ### Why 50 timed
+
 - `min` of 50: P(min ≤ true_min × 1.01) ≈ 1 − 0.99^50 ≈ 0.995. Robust.
 - `median` of 50: standard error ≈ 1.253σ/√50 ≈ 0.18σ. Tight.
 - Below 30: min unstable (one outlier dominates). Above 100: marginal gain.
 
 ### Sweep time budget (20/50, bf16, 14 sizes, 2 kernels)
+
 - Small N (32–256): kernel ~1–50 µs. 50 iters ≈ 50 µs–2.5 ms. Negligible.
 - Mid N (512–1024): kernel ~50–500 µs. 50 iters ≈ 2.5–25 ms. Fine.
 - Large N (2048–4096): kernel ~1–10 ms. 50 iters ≈ 50–500 ms per kernel per N.
@@ -682,11 +760,13 @@ reference.
   (14 × ~150 ms ≈ 2 s). **~6 s per dtype per arch.** Acceptable.
 
 ### Why not higher
+
 - At 100/1000: large-N alone = 14 × 2 × 10 s = 280 s. No statistical gain
   over 20/50. The bottleneck for measurement quality is GPU boost-clock
   stability and `cudaEvent` resolution (~1 µs), not sample count.
 
 ### Future refinement (not Phase 1)
+
 - If tiny-kernel noise becomes visible in Phase 2 (min bouncing between runs),
   consider **time-bounded mode** for small N: run for ≥10 ms total, count
   iters. Better signal-to-noise for sub-µs kernels than fixed count. Not
@@ -697,6 +777,7 @@ reference.
 ## 12. Phase 2 plan
 
 ### 12.1 Three dtypes (priority order)
+
 Phase 2 organizes work around three storage dtypes. The pedantic fp32 /
 CUDA-core path is dropped entirely (see §9) — only the tf32 path exists
 for 32-bit float storage.
@@ -713,6 +794,7 @@ for 32-bit float storage.
    as bf16/fp16, different dtype config.
 
 ### 12.2 Phase 2A — cuBLAS references for bf16 / fp16 / tf32
+
 - `dtypes.h`: add `tfloat = float` alias; `name<float>()` returns
   `"tf32"`. Drop the fp32 pedantic name.
 - `CublasTypeMap<T>` gains `math_mode` field; `cublas_gemm` wraps the
@@ -729,9 +811,10 @@ for 32-bit float storage.
   math-mode restore.
 
 ### 12.3 Phase 2B — Visualization (Python + Plotly + Dash + SQLite)
+
 - Stack: Plotly (interactive hover), Dash (reactive checkboxes/toggles
-  + built-in Flask server), SQLite (`sqlite3` stdlib, queryable,
-  git-trackable). No matplotlib.
+  - built-in Flask server), SQLite (`sqlite3` stdlib, queryable,
+    git-trackable). No matplotlib.
 - `db/gemm_y.db` tracked in git, declared binary in `.gitattributes`.
   CSVs in `results/` stay gitignored (regenerable).
 - `scripts/ingest.py` reads CSV + `.meta` sidecar, appends to SQLite.
@@ -743,7 +826,6 @@ for 32-bit float storage.
   kernel desc, N, median_ns, ref_median_ns, speedup vs cuBLAS.
 - `scripts/dump_db.py` — optional JSONL export for human inspection.
 - `pyenv/` venv (Python 3.14) for all scripts.
-
 
 - `src/sm90/gemm_bf16_tiled_128.cu` (+ `.cuh`) — same algorithm, sm_90
   `wmma` API.
@@ -762,34 +844,35 @@ for 32-bit float storage.
 One-line rationale per refactor item. Serves as audit trail for why each
 cleanup was made. Items map to `TODO.md` Phase 1.5 R1–R20.
 
-| ID | File / area | Change | Why |
-|----|-------------|--------|-----|
-| R1  | `Copy.h` | Revert to sync `cudaMemcpy`/`cudaMemcpy2D`; drop stream param | Async-on-pageable is silently sync + staging overhead (§2 correction) |
-| R2  | `Copy.h` | Extract `detail::plan_copy` + `copy_contiguous`/`copy_strided` | ~50 lines duplicated between `copy_h2d`/`copy_d2h` |
-| R3  | `Profiler` | `run_sweep` returns `SweepResult`; CSV writing moves to `main.cpp` | Decouple bench logic from I/O; make `run_sweep` testable |
-| R4  | `Profiler` | Measure cuBLAS once per N, reuse for all kernels | Phase 1 re-timed cuBLAS per kernel (K×S×kTimed extra launches) |
-| R5  | `cuda_compat.h` | Include `<cublas_v2.h>` under pragma; remove direct includes | AGENTS.md: all CUDA includes via the single wrapper |
-| R6  | `Buffer.h` | Fix misleading 64-byte alignment comment | `std::vector` default allocator gives ~16 bytes, not 64 |
-| R7  | `test.cu` | Remove `test_smoke`; trim `test_buffer_device` | `test_smoke` is RAII-violating and redundant; round-trip covered by Copy tests |
-| R8  | `test.cu` | Strengthen `test_cuda_timer`; add 5 new tests | Cover const-conversion, strided cuBLAS, naive kernel, small profiler sweep |
-| R9  | `src/bench/microbench/` | Move microbenches to subdir; cleaner CMake glob | Replace fragile `list(FILTER ... REGEX)` with directory-based selection |
-| R10 | `print_table.h` | Aligned fixed-width table output for microbenches | Raw CSV-to-stdout is hard to scan; one-off microbenches don't need CSV |
-| R11 | `src/Arch.h` | Single `kArchName` definition | Duplicated in `main.cpp`, `test.cu`, `Profiler.cu` |
-| R12 | `src/bench/Stats.h` | Extract `TimedStats` + `summarize_ns` | Duplicated in `Profiler.cu` and `memcpy_microbench.cu` |
-| R13 | `src/bench/Fill.h` | Extract `fill_sequential(A, B)` | Duplicated in `Profiler.cu` and `test.cu` |
-| R14 | `src/dtypes.h` | `dtypes::name<T>()`; co-locate dtype aliases | `dtype_name<T>()` in `Profiler.cu` is duplicated knowledge; inconsistent with `string_view` convention |
-| R15 | `Profiler.cu` | `h2d_ns` column repeats global value, not `0.0` | Current `0.0` reads as "H2D took 0 ns" — misleading |
-| R16 | `Profiler.cu` | `Timer<>` default capacity (drop `<4096>`) | Only 3 marks used; 4096 is confusing |
-| R17 | `CudaTimer.h` | `elapsed_ms()` marked `const` | No state mutation; const-correctness per AGENTS.md |
-| R18 | `MatrixView.h` | `block()` debug-only bounds asserts | Silent OOB if misused; cheap debug-only check |
-| R19 | `cublas_gemm.h` | Extract `GEMM_Y_ASSERT`; layout check → debug assert | 13 lines of `fprintf`+`abort` is noise; Phase 1 invariant, not runtime API contract |
-| R20 | `CudaCheck.h` | Rename macro local vars `_gemm_y_err` → `gemm_y_err_` | Suffix-underscore avoids reserved-identifier edge cases |
+| ID  | File / area             | Change                                                             | Why                                                                                                    |
+| --- | ----------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| R1  | `Copy.h`                | Revert to sync `cudaMemcpy`/`cudaMemcpy2D`; drop stream param      | Async-on-pageable is silently sync + staging overhead (§2 correction)                                  |
+| R2  | `Copy.h`                | Extract `detail::plan_copy` + `copy_contiguous`/`copy_strided`     | ~50 lines duplicated between `copy_h2d`/`copy_d2h`                                                     |
+| R3  | `Profiler`              | `run_sweep` returns `SweepResult`; CSV writing moves to `main.cpp` | Decouple bench logic from I/O; make `run_sweep` testable                                               |
+| R4  | `Profiler`              | Measure cuBLAS once per N, reuse for all kernels                   | Phase 1 re-timed cuBLAS per kernel (K×S×kTimed extra launches)                                         |
+| R5  | `cuda_compat.h`         | Include `<cublas_v2.h>` under pragma; remove direct includes       | AGENTS.md: all CUDA includes via the single wrapper                                                    |
+| R6  | `Buffer.h`              | Fix misleading 64-byte alignment comment                           | `std::vector` default allocator gives ~16 bytes, not 64                                                |
+| R7  | `test.cu`               | Remove `test_smoke`; trim `test_buffer_device`                     | `test_smoke` is RAII-violating and redundant; round-trip covered by Copy tests                         |
+| R8  | `test.cu`               | Strengthen `test_cuda_timer`; add 5 new tests                      | Cover const-conversion, strided cuBLAS, naive kernel, small profiler sweep                             |
+| R9  | `src/bench/microbench/` | Move microbenches to subdir; cleaner CMake glob                    | Replace fragile `list(FILTER ... REGEX)` with directory-based selection                                |
+| R10 | `print_table.h`         | Aligned fixed-width table output for microbenches                  | Raw CSV-to-stdout is hard to scan; one-off microbenches don't need CSV                                 |
+| R11 | `src/Arch.h`            | Single `kArchName` definition                                      | Duplicated in `main.cpp`, `test.cu`, `Profiler.cu`                                                     |
+| R12 | `src/bench/Stats.h`     | Extract `TimedStats` + `summarize_ns`                              | Duplicated in `Profiler.cu` and `memcpy_microbench.cu`                                                 |
+| R13 | `src/bench/Fill.h`      | Extract `fill_sequential(A, B)`                                    | Duplicated in `Profiler.cu` and `test.cu`                                                              |
+| R14 | `src/dtypes.h`          | `dtypes::name<T>()`; co-locate dtype aliases                       | `dtype_name<T>()` in `Profiler.cu` is duplicated knowledge; inconsistent with `string_view` convention |
+| R15 | `Profiler.cu`           | `h2d_ns` column repeats global value, not `0.0`                    | Current `0.0` reads as "H2D took 0 ns" — misleading                                                    |
+| R16 | `Profiler.cu`           | `Timer<>` default capacity (drop `<4096>`)                         | Only 3 marks used; 4096 is confusing                                                                   |
+| R17 | `CudaTimer.h`           | `elapsed_ms()` marked `const`                                      | No state mutation; const-correctness per AGENTS.md                                                     |
+| R18 | `MatrixView.h`          | `block()` debug-only bounds asserts                                | Silent OOB if misused; cheap debug-only check                                                          |
+| R19 | `cublas_gemm.h`         | Extract `GEMM_Y_ASSERT`; layout check → debug assert               | 13 lines of `fprintf`+`abort` is noise; Phase 1 invariant, not runtime API contract                    |
+| R20 | `CudaCheck.h`           | Rename macro local vars `_gemm_y_err` → `gemm_y_err_`              | Suffix-underscore avoids reserved-identifier edge cases                                                |
 
 ---
 
 ## 14. Phase 1.5 validation
 
 ### Exit criteria
+
 - All R1–R20 refactor items landed; `test_cuda` passes with 874 checks.
 - `Copy.h` reverted to sync; `Profiler::run_sweep` returns `SweepResult`;
   cuBLAS measured once per N.
@@ -798,6 +881,7 @@ cleanup was made. Items map to `TODO.md` Phase 1.5 R1–R20.
 - Dedup extractions (`Arch.h`, `Stats.h`, `Fill.h`, `dtypes.h`) in place.
 
 ### Results
+
 ```
 # Phase 1.5 refactor complete. No new features; correctness + hygiene only.
 # Test suite: 874 checks, 0 failures (was ~30 checks pre-Phase 1.5).
@@ -853,10 +937,12 @@ appears (hover, axis title, run history column): `% vs cuBLAS (+ = faster)`.
 ### Future: TFLOPS
 
 Deferred to a later sub-phase. Definition will be:
+
 ```
 tflops    = 2 * N^3 / (median_ns * 1e-9) / 1e12
 %_of_peak = tflops / peak_tflops[arch][dtype] * 100
 ```
+
 Needs a peak-TFLOPS lookup per `(arch, dtype)` (RTX 5070 bf16 TC peak,
 H100 bf16 TC peak, etc.). Not blocked by the `% perf vs cuBLAS` metric —
 the two are independent.
@@ -873,28 +959,33 @@ Arch-specific custom kernels live under `src/sm90/` and `src/sm120/`
   the template is instantiated for bf16 / fp16 / tfloat from one
   definition; it was never bf16-specific).
 - **`gemm_bf16.cuh`** — shared declaration header for all **bf16-specific**
-  custom kernels. Each struct declares `name()`, `description()`, and
-  `operator()(GemmArgs<__nv_bfloat16>, cudaStream_t) const` (no template
-  parameter — tiled TC kernels are dtype-specific by nature). Mirror in
+  custom kernels. It may declare ordinary structs or class templates. Each
+  concrete specialization declares `name()`, `description()`, and
+  `operator()(GemmArgs<__nv_bfloat16>, cudaStream_t) const`. Mirror in
   `src/sm90/gemm_bf16.cuh`.
 - **`gemm_bf16_k<n>.cu`** — one `.cu` per kernel definition. Each owns
   its own `operator()` body and its own explicit instantiation
   (`template struct ...` if templated, or just the struct definition if
   bf16-only). CMake's `file(GLOB _gemm_y_arch_sources CONFIGURE_DEPENDS
-  "${arch_dir}/*.cu")` auto-picks new `.cu` files — zero CMake changes
+"${arch_dir}/*.cu")` auto-picks new `.cu` files — zero CMake changes
   per kernel.
 
 ### Naming convention
 
-Custom kernels are named `k0`, `k1`, `k2`, … **during development**. The
-counter tracks iteration progress: `k0` ≈ naive-level perf (first
-attempt), `k9` faster than `k1`. The counter is the user's progress
-ruler, not the permanent identity.
+Kernel families are named `k0`, `k1`, `k2`, … **during development**. The
+counter identifies the experiment family, not every compile-time
+specialization. Each registered specialization must still have a unique
+benchmark name, for example:
 
-Switch to **descriptive names** (`Tiled128`, `Tiled128V2`,
-`DoubleBuffer256`, …) when a kernel is finalized / competitive. Use a
-`V2`/`V3` suffix when iterating on the *same* strategy (one variable
-per commit per AGENTS.md experiment discipline), not a global counter.
+```text
+k0_64x64_k32_w4_s2
+k0_128x128_k32_w8_s2
+```
+
+Descriptions should contain the readable strategy and all parameters needed
+to interpret the result. Switch a family to a descriptive name
+(`Tiled128`, `DoubleBuffer256`, …) only when the strategy is finalized or
+competitive.
 
 `NaiveGemm<T>` stays as the permanent sanity baseline — it is not `k0`.
 The first custom kernel (`k0`) is a distinct struct, registered
@@ -905,34 +996,32 @@ alongside `NaiveGemm` in `main.cpp`.
 - **One shared `.cuh`** avoids per-kernel header proliferation (the
   user's stated objection). Declarations are cheap; definitions are
   where the complexity lives.
-- **One `.cu` per kernel** gives compile isolation — a one-line edit to
+- **One `.cu` per kernel family** gives compile isolation — a one-line edit to
   `k5`'s inner loop should not recompile `k0`–`k4`. nvcc is slow;
-  per-kernel TUs keep the edit-compile-test loop tight. This is the
-  standard C++ declaration/definition split, with the declaration shared.
-  It is not "multiple files per kernel" in the sense the user objected
-  to — each kernel has exactly one file (its `.cu`); the `.cuh` is shared.
-- **`k0`/`k1`/… counter naming** is intuitive to the user as a progress
-  ruler. Descriptive naming is reserved for finalized kernels to avoid
-  premature commitment to a strategy label.
-- **bf16-only structs (no template)** reflects that tiled TC kernels are
-  dtype-specific. `NaiveGemm<T>` stays templated because it is genuinely
-  generic. Forcing tiled kernels into a template would require
-  dtype-conditional `wmma`/`mma` fragment types — worse than separate
-  structs per dtype.
+  per-kernel TUs keep the edit-compile-test loop tight. A family may contain
+  several explicitly instantiated compile-time variants.
+- **`k0`/`k1`/… family naming** is intuitive as a progress ruler. Unique
+  specialization names preserve unambiguous benchmark and dashboard rows.
+- **Templates control algorithm configuration; dtype remains a family-level
+  choice.** A bf16-specific template can use bf16 MMA types directly without
+  forcing unrelated dtypes into one conditional implementation. A separate
+  fp16 or tf32 family may share ideas while retaining independent code and
+  measurements.
 
 ### Consequences
 
-- Adding a kernel = 1 new `.cu` + a few lines in `gemm_bf16.cuh` + 1
-  line in `main.cpp`. Zero CMake changes.
-- Declaring a struct in `gemm_bf16.cuh` without a matching `.cu`
-  definition → link error on `operator()`. The `KernelTraits_v` SFINAE
-  check only validates the declaration, not the definition. Acceptable
-  for a small project; just be aware.
+- Adding a kernel family = 1 new `.cu` + declarations in `gemm_bf16.cuh` +
+  registration in `main.cpp`. Zero CMake changes.
+- Adding a compile-time variant = an explicit instantiation in the `.cu` and
+  registration of that concrete type. Its `name()` must be unique.
+- Declaring a struct or template specialization in `gemm_bf16.cuh` without a
+  matching `.cu` definition → link error on `operator()`. `KernelTraits_v`
+  only validates the declaration, not the definition.
 - `tests/test.cu` uses the same `#if defined(CUDA_ARCH_SM_120)` /
   `#elif defined(CUDA_ARCH_SM_90)` include switch as `main.cpp`. Any
-  new header (`gemm_bf16.cuh`) needs an include there too if unit tests
-  for tiled kernels are desired. Defer until the kernel passes accuracy
-  — the Profiler-level sweep already catches accuracy failures.
+  new header (`gemm_bf16.cuh`) needs an include there if direct kernel tests
+  are later desired. The Profiler-level sweep remains the primary accuracy
+  gate.
 
 ---
 
@@ -967,16 +1056,16 @@ start/end pair.
 
 **What was deleted:**
 
-| File / symbol | Why |
-|---------------|-----|
-| `src/Tracer.h` | One consumer in `Profiler.cu`; replaced by 3 lines of inline `steady_clock`. The `Event` array + `string_view` lifetime footgun was unjustified for a single start/end pair. |
-| `src/Copy.h` | `copy_h2d` / `copy_d2h` wrappers collapsed to direct `cudaMemcpy` calls. `CopyPlan` / `plan_copy` / `copy_kind_v` / `cudaMemcpy2D` path all dead after per-`N` alloc (no strided buffers). |
-| `src/Layout.h` | ColMajor is the only layout, enforced structurally by `Matrix::alloc` setting `ld = rows`. The `Layout` enum, the `layout` field on `MatrixView`/`Matrix`, and every `RowMajor` branch were dead code. |
-| `MatrixView::block()` | Only existed to slice the 4096² pre-alloc. Zero call sites after per-`N` alloc. |
-| `MatrixView::is_contiguous()` | Only used by `Copy.h` to dispatch `cudaMemcpy` vs `cudaMemcpy2D`. Always true after per-`N` alloc. |
-| `MatrixView`/`Matrix` `Layout` field + `RowMajor` branches | Dead — ColMajor-only is the stated invariant everywhere (AGENTS.md, ARD §9, every kernel comment, `cublas_gemm`). |
-| `memcpy_microbench` `strided_2d` variants | No longer representative — the bench runner uses contiguous `cudaMemcpy` exclusively. Contiguous + async variants kept. |
-| `test_matrixview_block`, `test_matrixview_is_contiguous`, `test_copy_roundtrip_submatrix`, `test_cublas_gemm_bf16_strided` | Exercises the deleted `block()` / `is_contiguous()` / strided-copy / strided-cuBLAS paths. |
+| File / symbol                                                                                                              | Why                                                                                                                                                                                                    |
+| -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `src/Tracer.h`                                                                                                             | One consumer in `Profiler.cu`; replaced by 3 lines of inline `steady_clock`. The `Event` array + `string_view` lifetime footgun was unjustified for a single start/end pair.                           |
+| `src/Copy.h`                                                                                                               | `copy_h2d` / `copy_d2h` wrappers collapsed to direct `cudaMemcpy` calls. `CopyPlan` / `plan_copy` / `copy_kind_v` / `cudaMemcpy2D` path all dead after per-`N` alloc (no strided buffers).             |
+| `src/Layout.h`                                                                                                             | ColMajor is the only layout, enforced structurally by `Matrix::alloc` setting `ld = rows`. The `Layout` enum, the `layout` field on `MatrixView`/`Matrix`, and every `RowMajor` branch were dead code. |
+| `MatrixView::block()`                                                                                                      | Only existed to slice the 4096² pre-alloc. Zero call sites after per-`N` alloc.                                                                                                                        |
+| `MatrixView::is_contiguous()`                                                                                              | Only used by `Copy.h` to dispatch `cudaMemcpy` vs `cudaMemcpy2D`. Always true after per-`N` alloc.                                                                                                     |
+| `MatrixView`/`Matrix` `Layout` field + `RowMajor` branches                                                                 | Dead — ColMajor-only is the stated invariant everywhere (AGENTS.md, ARD §9, every kernel comment, `cublas_gemm`).                                                                                      |
+| `memcpy_microbench` `strided_2d` variants                                                                                  | No longer representative — the bench runner uses contiguous `cudaMemcpy` exclusively. Contiguous + async variants kept.                                                                                |
+| `test_matrixview_block`, `test_matrixview_is_contiguous`, `test_copy_roundtrip_submatrix`, `test_cublas_gemm_bf16_strided` | Exercises the deleted `block()` / `is_contiguous()` / strided-copy / strided-cuBLAS paths.                                                                                                             |
 
 ### Rationale
 
@@ -1036,8 +1125,10 @@ start/end pair.
 ## 18. Reproducible benchmarks: clock locking (`bench.sh`)
 
 ### Decision
+
 Reproducible benchmarks must be run via `sudo scripts/bench.sh`. The
 wrapper:
+
 1. Enables persistence mode (`nvidia-smi -i 0 -pm 1`) — keeps the GPU
    driver loaded, avoiding the ~1s init latency on the first CUDA call.
 2. Queries the max graphics clock
@@ -1058,6 +1149,7 @@ control but it is not orchestrated by this wrapper — the auto curve
 suffices for short sweeps.
 
 ### Alternatives considered
+
 - **Record clock frequency in the `.meta` sidecar instead of locking**:
   rejected. Recording the frequency documents the conditions but doesn't
   make them reproducible — two runs at "max boost" can still differ by
@@ -1075,6 +1167,7 @@ suffices for short sweeps.
   level.
 
 ### Rationale
+
 - **Locking to max frequency is not overclocking.** The max graphics
   clock reported by `nvidia-smi` is within the GPU's validated boost
   range; the GPU vendor guarantees it under the thermal envelope.
@@ -1091,6 +1184,7 @@ suffices for short sweeps.
   state.
 
 ### Consequences
+
 - `./build/gemm_y` run directly (without `bench.sh`) produces
   non-reproducible numbers — documented in `AGENTS.md` and the binary's
   stdout header. Use only for smoke tests.
@@ -1105,7 +1199,9 @@ suffices for short sweeps.
 ## 19. Statistical rigor: 95% CI for the median + p95 + std
 
 ### Decision
+
 Each timed measurement (cuBLAS and custom kernel, per N) reports:
+
 - **min** — best-case (most robust vs OS noise).
 - **median** — the headline number (characterizes the typical case).
 - **std** — sample standard deviation (`n-1` denominator).
@@ -1122,6 +1218,7 @@ significant; if they overlap, the difference is inconclusive at the 95%
 level.
 
 ### Rationale
+
 - **Why a CI and not just a point estimate.** A 1% "win" over cuBLAS is
   indistinguishable from noise without a confidence interval. The CI
   turns "the median is 1% lower" into "the median is 1% lower ± X%, so
@@ -1149,6 +1246,7 @@ level.
   this sample size. More samples (Phase 2F) would tighten the CIs.
 
 ### Caveats
+
 - The 1.253 factor is **asymptotic** (large n). For `n=50` it's a good
   approximation; for `n<20` it underestimates the true SE. `kTimed=50`
   is large enough.
@@ -1162,6 +1260,7 @@ level.
   shift all samples together.
 
 ### Consequences
+
 - The CSV schema gains 8 columns (`kernel_std_ns`, `kernel_p95_ns`,
   `kernel_ci_low_ns`, `kernel_ci_high_ns` + `ref_*` equivalents). Old
   CSVs (pre-2E) don't have them; `ingest.py` writes NULL and the DB
@@ -1171,10 +1270,11 @@ level.
   summing them into a "total" would penalize cuBLAS with overhead it
   doesn't pay in production). Old DB rows keep their values (nullable).
 - The dashboard's hover shows `median`, `std`, `p95`, `95% CI [low,
-  high]` for both custom and cuBLAS, so the significance call is
+high]` for both custom and cuBLAS, so the significance call is
   visible at a glance.
 
 ### Future: full distribution (Phase 2F)
+
 The 95% CI + p95 is a summary. Phase 2F (deferred) stores all 50 raw
 samples in a `samples` table and adds box plots / violin plots for
 deep-dive distribution analysis (bimodal behavior, outlier
@@ -1185,12 +1285,15 @@ attribution).
 ## 20. Visualization methodology: dashboard views
 
 ### Decision
+
 Dashboard views built on the 2E.3 CI error bars and the 2G.5
 raw-sample storage. Each answers a distinct question about kernel
 performance.
 
 #### (f) Statistical significance overlay (Timing tab)
+
 Each custom point on the Timing tab gets a ring around its marker:
+
 - **Green** — custom is **significantly faster** than cuBLAS (custom CI
   entirely below cuBLAS CI — no vertical overlap).
 - **Red** — custom is **significantly slower** (custom CI entirely above).
@@ -1205,6 +1308,7 @@ is a clear signal). Overlap does not prove the difference is zero — it
 means the data is inconclusive at this sample size.
 
 #### (b) Speedup tab
+
 Plots `ref_median / kernel_median` (speedup ratio) vs N. `>1` = custom
 faster than cuBLAS. Parity line at 1.0. Per-point CI via first-order
 Gaussian propagation: the CI half-width for the ratio is
@@ -1213,6 +1317,7 @@ cuBLAS trace excluded (ratio = 1 by definition). Log-y default (ratios
 span 0.1–10×).
 
 #### (e) Cross-run diff view
+
 Sidebar gets a second run selector (Diff run B). Plots `median_A / median_B`
 vs N, one line per kernel name common to both runs. `>1` = run A is slower;
 `<1` = run A is faster. Parity line at 1.0. Per-point CI via propagation
@@ -1220,6 +1325,7 @@ vs N, one line per kernel name common to both runs. `>1` = run A is slower;
 kernel exists in only one run, it's skipped.
 
 ### Rationale
+
 - Each view answers a different question: "is the difference
   significant?" (significance overlay), "how much faster?" (Speedup),
   "did this run beat the last?" (Diff). No single view subsumes another.
@@ -1229,11 +1335,13 @@ kernel exists in only one run, it's skipped.
   for engineering purposes when the relative SEs are small (<10%).
 
 ### Caveats
+
 - The Diff tab's run A is the first selected run in the "Runs" multi-
   select; run B is the single-select "Diff run B" dropdown. If the Runs
   multi-select is empty, the Diff tab shows a message.
 
 ### Removed views
+
 The Distribution (box + violin), TFLOPS, and Roofline tabs were implemented
 and removed after manual review. The raw-sample `samples` table and
 `insert_sample`/`fetch_samples` infrastructure remain (storage is cheap

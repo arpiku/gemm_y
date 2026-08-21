@@ -1,325 +1,141 @@
 # AGENTS.md — gemm_y
 
-Project spec and contributor guidelines. Read this first.
+## Goal
 
-## Project Goal
+Develop custom CUDA GEMM kernels that match or beat cuBLAS on:
 
-Write custom CUDA kernels that **match or beat cuBLAS** for GEMM (`C = A × B`)
-on Hopper (sm_90) and Blackwell (sm_120), for `bf16`, `fp16`, and `tf32`.
+- Hopper (`sm_90`)
+- Blackwell (`sm_120`, local development target)
+- `bf16`, `fp16`, and `tf32` storage with fp32 accumulation
 
-- **First milestone:** `bf16` GEMM at parity with cuBLAS.
-- **Subsequent milestones:** `fp16`, then `tf32`.
-- **Target hardware:** RTX 5070 (Blackwell, sm_120) for local dev;
-  Hopper server (sm_90) for cross-arch validation.
-- **Success metric:** kernel time ≤ cuBLAS time across the full size sweep
-  (see Benchmarking), within the accuracy tolerance (see ARD §6).
+The current focus is bf16 optimization on `sm120`.
 
-## Non-Goals (for now)
+## Scope
 
-- Non-square matrices.
-- Batched GEMM, strided batched GEMM, grouped GEMM.
-- Transposed variants (`A^T`, `B^T`) — assume `C = A × B` only until baseline is hit.
-- Epilogue fusion (`α`, `β`, bias, activation) — plain `C = A × B` only.
-- Lower-precision (`fp8`, `int8`).
-- Multi-GPU or multi-node.
-- **fp32 pedantic (CUDA cores)** — dropped entirely. Only the tf32 path
-  (tensor cores) is implemented for 32-bit float storage. See ARD §9.
+Supported:
 
-## Tech Stack
+- `C = A × B`
+- ColMajor matrices
+- Square benchmark sizes
+- One architecture per build
+- cuBLAS v2 as the reference
 
-- **C++17** on the host (modern, idiomatic; no C++20 features).
-- **CUDA 17** on the device (`cuda_std_17`).
-- **CMake ≥ 3.21**, modern target-based usage.
-- **CUDA toolkit ≥ 12.8** (first release supporting both sm_90 and sm_120).
-- **One binary per arch** — selected at configure time via `GEMM_Y_CUDA_ARCH`.
-  No fat binaries, no runtime dispatch.
-- **Hardware** : RTX 5070 (default, BlackWell, sm_120 ,local machine), H100 (other, Hopper, sm_90 ,server)
+Not currently supported:
 
-## Tech Stack (Continued)  
-- **cuBLAS** - v2 (CUDA 12.8) to be used
-- **Reference comparison**: compare against `cublasGemmEx` fist, then the goal post will shift to beating `cublasLtMatmul` (the newer, lower-level API) 
-- **Dtypes**: `bf16` and `fp16` target Tensor Cores by default (fp32 accum). `tfloat = float` is the tf32 path (TC, `CUBLAS_TF32_TENSOR_OP_MATH`); no pedantic fp32 / CUDA-core path. See ARD §9.
-- **Python tooling**: Plotly + Dash + SQLite for the benchmark dashboard. venv at `pyenv/` (Python 3.14). See "Python tooling" under Build Commands.
+- Transposed, batched, grouped, or multi-GPU GEMM
+- Epilogue fusion (`alpha`, `beta`, bias, activation)
+- `fp8`, `int8`, or pedantic fp32 CUDA-core GEMM
 
-## Build Commands
+## Toolchain and builds
+
+- C++17 host code
+- CUDA C++17 device code
+- CUDA Toolkit >= 12.8
+- CMake >= 3.21
 
 ```sh
-# Blackwell (default, RTX 5070), Release, -O3
 cmake -B build
 cmake --build build -j
-
-# Hopper, Release
-cmake -B build -DGEMM_Y_CUDA_ARCH=sm_90
-cmake --build build -j
-
-# Debug build (-O0 -g)
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
-
-# Run tests (ctest; test_cuda is registered as a single CTest entry)
 ctest --test-dir build
-
-# Note: -Werror is intentionally not supported (nvcc's -Werror requires a
-# <kind> argument and greedily consumes the next flag as its value, breaking
-# the build). Rely on the strict warning set compiled in by default.
 ```
 
-### Python tooling
-
-The benchmark dashboard (Phase 2B) lives under `scripts/`. It uses a
-project-local venv at `pyenv/` (Python 3.14). Activate before running
-any script:
+Select Hopper explicitly:
 
 ```sh
-source pyenv/bin/activate
-pip install -r scripts/requirements.txt   # first time only
-python scripts/ingest.py results/bench_sm_120_bf16.csv [--label "..."]
-python scripts/server.py                   # dashboard at localhost:8050
-python scripts/dump_db.py                  # optional JSONL export
-python scripts/delete_run.py list          # list all runs in the DB
-python scripts/delete_run.py delete <id>   # delete a run + its measurements
+cmake -B build -DGEMM_Y_CUDA_ARCH=sm_90
+cmake --build build -j
 ```
 
-Workflow: `./build/gemm_y` writes CSV + `.meta` sidecar to `results/`
-(gitignored). `ingest.py` appends to `db/gemm_y.db` (tracked in git,
-declared binary in `.gitattributes`). `server.py` reads from the DB,
-never from CSV. Git sha is captured by `ingest.py` at ingest time.
+The default architecture is `sm_120`. Do not commit `build/`, benchmark results, profiler reports, or `compile_commands.json`.
 
-Targets:
-- `gemm_y` — main executable (`src/main.cpp` + arch-specific `.cu`).
-- `test_cuda` — build-verification smoke test (`tests/test.cu`).
+## Repository structure
 
-## Repository Layout
-
-```
-gemm_y/
-├── AGENTS.md              # this file — durable project spec
-├── ARD.md                 # architecture decision record (rationale)
-├── TODO.md                # forward-looking task list (no completed items)
-├── CMakeLists.txt         # build system
-├── .gitattributes         # declares db/gemm_y.db as binary
-├── pyenv/                 # Python venv for scripts/ (gitignored via pyenv/.gitignore)
-├── db/
-│   └── gemm_y.db          # SQLite benchmark DB (tracked, binary)
-├── src/
-│   ├── main.cpp           # entry point
-│   ├── cuda_compat.h      # single CUDA include wrapper
-│   ├── CudaCheck.h        # CUDA_CHECK / CUBLAS_CHECK / GEMM_Y_ASSERT
-│   ├── CudaTimer.h        # RAII cudaEvent pair (device timing)
-│   ├── Space.h            # compile-time memory-space tag (Host / Device)
-│   ├── Buffer.h, Matrix.h, MatrixView.h
-│   ├── Arch.h, dtypes.h   # arch name + dtype aliases/names (bf16/fp16/tfloat)
-│   ├── bench/             # Profiler, GemmArgs, KernelTraits, Accuracy,
-│   │   ├── Stats.h, Fill.h, CsvWriter.h
-│   │   └── microbench/    # memcpy + launch-overhead microbenches
-│   ├── cublas/            # CublasHandle, CublasMathModeGuard, cublas_gemm
-│   ├── sm90/              # Hopper-specific kernels
-│   └── sm120/             # Blackwell-specific kernels
-├── tests/
-│   └── test.cu            # unit tests + build-verification
-└── scripts/               # ingest.py, server.py, db.py, dump_db.py, requirements.txt
+```text
+src/main.cpp                 benchmark entry point and kernel registration
+src/bench/                   profiler, timing, accuracy, output helpers
+src/cublas/                  cuBLAS reference implementation
+src/sm90/                    Hopper kernels
+src/sm120/                   Blackwell kernels
+tests/test.cu                build and correctness smoke tests
+scripts/                     benchmark ingestion and dashboard tools
 ```
 
-## LLM Context Loading
+CMake compiles only the selected architecture directory. New `.cu` files in that directory are discovered automatically.
 
-At session start, load:
-- `AGENTS.md` — always (durable contract).
-- `TODO.md` — always (what to do next; no completed items).
-- `ARD.md` — table of contents only; load specific sections on demand.
+## Kernel contract
 
-Do not load `ARD.md` in full unless reviewing a specific decision.
+Each custom kernel is independently identifiable and should have its own `.cu` file. During development kernels use names `k0`, `k1`, etc.; finalized strategies may use descriptive names.
 
-## Coding Conventions
+The shared declaration header contains the harness adapter:
 
-### C++ / CUDA Style
-- **Modern C++17**: `constexpr`, `[[nodiscard]], `noexcept` where honest.
-- **Modern C++17**: `const` qualifiers for constants, things that may be calculated at compile time, are calculated at compile time.
-- **RAII** for all CUDA resources. Wrap `cudaMalloc`/`cudaFree` in a small
-  device-buffer type; never leak raw `cudaFree` calls across early returns.
-- **No exceptions across the CUDA boundary** — kernels can't throw, and host
-  code calling CUDA APIs should check return codes and propagate via return
-  value or `std::optional`/`expected`-like pattern.
-- **No `using namespace` in headers.**
-- **Header guards**: `#pragma once` (already the convention).
-- **No phase trailers in source comments**: do not carry `Phase X.Y`,
-  `RXX`, or `Chunk X.X` tags in source comments. The durable record lives
-  in git history (`git log --grep="Phase: X.X"`) and ARD phase-summary
-  sections. Source comments explain *why*, not *which phase*.
-- **Comment discipline**: prefer one concise explanation at the type/function
-  level over restating the same fact in the header, the helper, and the
-  macro. Drop comments that restate the code; keep comments that explain
-  intent, constraints, or non-obvious tradeoffs.
+```cpp
+static constexpr std::string_view name();
+static constexpr std::string_view description();
+void operator()(GemmArgs<T>, cudaStream_t) const;
+```
 
-### Dtype conventions
-- **`tfloat = float`** alias (in `src/dtypes.h`). Always commented at the
-  alias declaration and at every use site with: `// tfloat = tf32 path
-  (TC), not pedantic fp32 (CUDA cores).` The pedantic fp32 / CUDA-core
-  path is dropped entirely — only the tf32 tensor-core path is implemented
-  for 32-bit float storage. See ARD §9.
-- **`CublasTypeMap<T>::math_mode`** selects the cuBLAS math mode per
-  dtype: `CUBLAS_DEFAULT_MATH` for bf16/fp16, `CUBLAS_TF32_TENSOR_OP_MATH`
-  for tfloat. `cublas_gemm` wraps the call in `CublasMathModeGuard` — no
-  distinct `cublas_gemm_tf32` entry point.
+The device `__global__` function must be pure CUDA and take raw pointers and dimensions:
 
-### Accuracy / tolerance
-- **`kRelErrTol<T>`** is a per-dtype compile-time constant
-  (`template <typename T> constexpr double kRelErrTol<T>()`):
-  bf16 → 1e-2, fp16 → 1e-3, tfloat → 1e-3. See ARD §6.
-- **Failed kernels are skipped at the Profiler level**: if
-  `err.max_rel > kRelErrTol<T>`, the row is not written to the CSV
-  (timing of mathematically invalid kernels is meaningless). A stderr
-  FAIL message is printed with N, kernel name, rel_err, tol. The cuBLAS
-  reference row is always written (ground truth, err == 0).
+```text
+(const T* A, const T* B, T* C,
+ int M, int N, int K, int ldA, int ldB, int ldC)
+```
 
-### CUDA-Specific
-- **Kernel timing**: use `cudaEvent` for device-side timing via `CudaTimer`
-  (RAII `cudaEvent_t` pair). Host wall-time for orchestration context
-  (e.g. total sweep time) uses inline `std::chrono::steady_clock` — 3 lines
-  at the call site, no wrapper type. Never use `steady_clock` for kernel
-  timing; it includes launch overhead (~5 µs) and OS jitter.
-- **Error checking**: every CUDA runtime call must be checked. Provide a
-  `CUDA_CHECK(expr)` macro that prints `cudaGetErrorString` and aborts.
-- **Headers**: include `cuda_runtime.h` (and other CUDA headers, including
-  `<cublas_v2.h>`) through a single wrapper `src/cuda_compat.h` that
-  suppresses `-Wold-style-cast` / `-Wconversion` noise from NVIDIA's headers.
-- **Arch-specific code**: prefer separate `.cu` files under `src/sm90/` and
-  `src/sm120/` over `#ifdef` branches. CMake only compiles the directory
-  matching `GEMM_Y_CUDA_ARCH`.
-- **Kernel file organization** (see ARD §16): within each arch dir,
-  `gemm_naive.{cuh,cu}` holds the dtype-agnostic `NaiveGemm<T>`
-  template; `gemm_bf16.cuh` is the shared declaration header for all
-  bf16-specific custom kernels; each kernel's `operator()` definition
-  lives in its own `gemm_bf16_k<n>.cu` (compile isolation). Custom
-  kernels are named `k0`, `k1`, … during development (counter = progress
-  ruler); switch to descriptive names (`Tiled128`, `Tiled128V2`, …) when
-  finalized. `NaiveGemm<T>` is the permanent sanity baseline, not `k0`.
-- **Device kernel ABI** (see ARD §3): the device `__global__` function
-  takes raw pointers + dimension ints `(const T* A, const T* B, T* C,
-  int M, int N, int K, int ldA, int ldB, int ldC)` — pure CUDA, no
-  project includes. The `operator()` functor is the thin adapter that
-  unpacks `GemmArgs<T>` into the raw-pointer launch. `MatrixView` is not
-  passed across the kernel boundary.
-- **Warp-level primitives**: prefer `__shfl_sync`, `wmma`/`mma` over
-  shared-memory reductions where the arch supports it natively.
-- **Kernel ABI (`GemmArgs<T>`)**: `GemmArgs` is the **harness ABI** —
-  `A`/`B` are `MatrixView<const T, Device>` (read-only inputs), `C` is
-  `MatrixView<T, Device>` (mutable output). Relies on `MatrixView`'s
-  implicit converting ctor (`MatrixView<T,S> -> `MatrixView<const T,S>`) —
-  zero call-site churn. The **device kernel ABI** is raw pointers +
-  dimension ints (see "Device kernel ABI" above); `operator()` is the
-  adapter between the two. `cublas_gemm` is the exception: it takes
-  writable views for A/B because C++ template argument deduction does
-  not consider implicit conversions (see ARD §3).
-- **`MatrixView` dual-use**: (1) host-side view (`operator()` for element
-  access, converting ctor for const-correctness), (2) kernel-side POD
-  descriptor (only `ptr`/`rows`/`cols`/`ld` read directly). Host methods
-  are **not** `__device__`-callable; kernels read fields directly (see
-  ARD §1). No `block()` or `is_contiguous()` — the bench runner allocates
-  per-`N` (see ARD §5), so submatrix slicing and strided-copy dispatch
-  are gone. ColMajor is the only layout, enforced structurally by
-  `Matrix::alloc` setting `ld = rows`.
-- **`CublasMathModeGuard`** (free class in `src/cublas/CublasHandle.h`):
-  RAII guard that captures the current math mode via
-  `cublasGetMathMode`, sets a new mode, and restores the previous mode in
-  the dtor. Used by `cublas_gemm` to apply `CublasTypeMap<T>::math_mode`
-  per call. Non-copyable, non-movable. See ARD §9.
-- **Layout**: ColMajor only. No `Layout` enum, no `layout` field on
-  `MatrixView`/`Matrix`. `Matrix::alloc` sets `ld = rows` unconditionally.
-  If a future phase needs RowMajor, re-add a `Layout` tag + the branches
-  (5-line re-add per call site; not worth carrying as dead code).
+It must not depend on `MatrixView` or profiler code. The functor unpacks `GemmArgs` and launches it. Layout is ColMajor:
 
-### Warnings
-- Host CXX: full strict set (`-Wall -Wextra -Wpedantic -Wshadow -Wconversion`
-  `-Wnon-virtual-dtor -Wold-style-cast -Wcast-align -Wunused`
-  `-Woverloaded-virtual -Wformat=2 -Wnull-dereference`).
-- `nvcc` host compiler: reduced subset (see `CMakeLists.txt` for the
-  rationale — CUDA's own headers trip the dropped flags).
-- `nvcc` native: `-Wreorder -Winit-self`.
-- `-Werror` is not supported (nvcc's `-Werror` requires a `<kind>` argument
-  and greedily consumes the next flag as its value, breaking the build).
-  Rely on the strict warning set compiled in by default.
+```text
+A(i,k) = A[i + k*ldA]
+B(k,j) = B[k + j*ldB]
+C(i,j) = C[i + j*ldC]
+```
 
-## Benchmarking Protocol
+Kernels must fully overwrite `C`, support arbitrary valid leading dimensions, and guard all tile boundaries.
 
-### Reproducible runs (clock locking)
-- **Reproducible benchmarks must be run via `sudo scripts/bench.sh`**.
-  The wrapper locks the GPU graphics clock to max frequency, runs
-  `./build/gemm_y` as the original (non-root) user, then resets
-  clock/persistence on exit (trap on EXIT/INT/TERM). See ARD §18 for the
-  full rationale.
-- Running `./build/gemm_y` directly (without clock locking) produces
-  **non-reproducible** numbers — GPU clock drift and thermal throttling
-  introduce 1–5% noise that swamps small kernel-vs-cuBLAS differences.
-- **Thermal safety**: locking to max frequency is **not** overclocking
-  (it's within the GPU's validated boost range); thermal throttling still
-  protects the hardware; the wrapper prints pre/post temperature as a
-  sanity check. The auto-fan curve (the only path on consumer cards like
-  RTX 5070, where manual fan control is unsupported) is usually
-  sufficient for short sweeps.
+## Dtypes and accuracy
 
-### Matrix Size Sweep
-- Square matrices only: `N ∈ {32, 64, 96, 128, 192, 256, 384, 512, 768,
-  1024, 1536, 2048, 3072, 4096}`.
-- Powers of 2 plus midpoints — captures both tiling-aligned and
-  misaligned cases.
-- For each `N`: benchmark both the custom kernel and cuBLAS reference.
+- `bf16` and `fp16`: tensor cores with fp32 accumulation
+- `tfloat = float`: TF32 tensor-core path only, never pedantic fp32
+- Relative-error tolerances: bf16 `1e-2`, fp16 `1e-3`, tf32 `1e-3`
 
+The profiler compares custom output with cuBLAS. Kernels exceeding the dtype tolerance are reported as failures and omitted from benchmark results.
 
-### Output artifacts
-- `results/bench_<arch>_<dtype>.csv` — one row per (N, kernel). Failed
-  kernels (rel_err > tol) are absent. Schema documented in ARD §5.
-- `results/bench_<arch>_<dtype>.meta` — key=value sidecar with run
-  metadata (arch, dtype, warmup/timed iters, tol, sweep sizes, kernel
-  list, timestamp). Parsed by `scripts/ingest.py`. No git sha (captured
-  at ingest time).
-- `db/gemm_y.db` — SQLite store of all ingested runs. Tracked in git,
-  declared binary in `.gitattributes`. Source of truth for the dashboard.
+## CUDA and C++ rules
 
-### Visualization
-- **Tool**: Python + Plotly + Dash + SQLite (see "Python tooling" under
-  Build Commands). No matplotlib.
-- **Dashboard** (`scripts/server.py`, `localhost:8050`): single page,
-  sidebar + three tabs (Timing / Accuracy / Run History). Sidebar
-  filters: arch, dtype, custom-vs-cuBLAS, runs (multi-select), scale
-  (log-log / linear). Hover shows arch, dtype, custom/ref, kernel name,
-  kernel desc, N, median_ns, ref_median_ns, speedup vs cuBLAS.
-- **Default plot**: log-log, `kernel_median_ns` vs `N`. One line per
-  (run, kernel). cuBLAS is the reference line.
+- Include CUDA headers through `src/cuda_compat.h`.
+- Check every CUDA runtime and cuBLAS call.
+- Use RAII for CUDA resources.
+- Use CUDA events for kernel timing; use `steady_clock` only for host orchestration timing.
+- Do not use `using namespace` in headers.
+- Use `constexpr`, `const`, `[[nodiscard]]`, and `noexcept` where honest.
+- Keep comments focused on intent, constraints, or non-obvious decisions.
+- Do not add historical experiment or chunk labels to source comments.
 
-## Experiment Discipline
+## Benchmarking
 
-- **Hypothesis-driven**: each experiment has a stated hypothesis
-  ("tiling 128×128 with 8 warps per CTA beats cuBLAS at N≥512") and a
-  pass/fail criterion before the run.
-- **One variable at a time**: tile size, warp count, K-dim unroll, memory
-  layout — change one per commit.
-- **Record negative results**: a kernel that loses to cuBLAS still gets
-  committed with a clear commit message explaining *why* it was tried and
-  *what* the bottleneck was. Future agents will otherwise re-try dead ends.
-- **Microbenchmarks first**: before touching GEMM, measure raw copy
-  bandwidth (`cudaMemcpy` H2D/D2H), kernel launch overhead, and
-  matrix-generation time on the host. These set the floor and ceiling.
+The square sweep is:
 
-## Git Workflow
+```text
+32, 64, 96, 128, 192, 256, 384, 512, 768,
+1024, 1536, 2048, 3072, 4096
+```
 
-- **Branch per feature/experiment**: `bf16_baseline`, `bf16_tiling_128`,
-  `sm90_wmma_v2`, etc.
-- **Granular commits**: one logical change per commit. A new tile size is
-  one commit; a bugfix to the same kernel is a separate commit.
-- **Commit message format**: Conventional Commits (`feat:`, `perf:`,
-  `fix:`, `chore:`, `docs:`, `test:`, `bench:`). Body explains *why*,
-  not just *what*.
-- **Phase trailer**: every commit body ends with a `Phase: X.X` footer
-  (e.g. `Phase: 1.5`, `Phase: 2A`). This is the durable phase-history
-  marker — query with `git log --grep="Phase: 1.5"`. No merge commits
-  required; fast-forward merges are fine.
-- **Completed work leaves `TODO.md`**: when a phase completes, cut its
-  section from `TODO.md`. The phase's commits (found via the trailer)
-  and the ARD phase-summary section (e.g. §10, §14) are the durable
-  record. `TODO.md` is forward-looking only.
-- **Never commit** `build/`, `results/`, `*.nsys-rep`, `*.ncu-rep`,
-  `compile_commands.json` — all gitignored.
-- **`db/gemm_y.db` IS committed** (tracked, declared binary in
-  `.gitattributes`). It is the durable record of benchmark history.
+Each size runs cuBLAS and every registered custom kernel with warmups and timed CUDA-event samples. Reproducible benchmark runs must use:
 
-## Profiling Tools
-- Profiling will be setup later (nsys & ncu)
+```sh
+sudo scripts/bench.sh
+```
+
+Results are written to `results/` and can be ingested into the SQLite dashboard with the scripts under `scripts/`.
+
+## Experiment workflow
+
+The current cleanup work is documentation-first. Do not change kernel behavior while documenting the optimization plan.
+
+- Keep each kernel independently identifiable and benchmarkable.
+- Record tile shape, warp count, staging, layouts, and other relevant parameters in the kernel description.
+- Change one kernel variable at a time during later optimization work.
+- Validate correctness before comparing performance; the profiler accuracy gate is the primary kernel-output check.
+- Keep failed or slower experiments available for comparison; do not hide negative results.
+- Do not commit changes or create branches unless explicitly requested.
+
+Earlier work established the build system, architecture split, kernel/harness ABI, profiler, cuBLAS reference path, accuracy gate, and benchmark reporting. The current prologue work makes those contracts and the upcoming bf16 `k0` experiment workflow explicit before kernel implementation begins.
