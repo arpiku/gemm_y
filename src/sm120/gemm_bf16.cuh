@@ -74,6 +74,28 @@ struct k2_tma_wmma {
   void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
 };
 
+// k2_tma_mma — TMA-fed tile with explicit ldmatrix and MMA instructions.
+struct k2_tma_mma {
+  static constexpr std::string_view name() { return "k2_tma_mma"; }
+  static constexpr std::string_view description() {
+    return "bf16 TMA inline-PTX MMA GEMM; 64x64x16 tile; 8 warps; "
+           "m16n8k16; fp32 accum; aligned full tiles only";
+  }
+  static bool supports(const GemmArgs<__nv_bfloat16> &args);
+  void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
+};
+
+// k3_tma_mma_pipe — two-stage pipelined TMA with explicit MMA.
+struct k3_tma_mma_pipe {
+  static constexpr std::string_view name() { return "k3_tma_mma_pipe"; }
+  static constexpr std::string_view description() {
+    return "bf16 two-stage pipelined TMA inline-PTX MMA GEMM; 64x64x16 "
+           "tile; 8 warps; m16n8k16; fp32 accum; aligned full tiles only";
+  }
+  static bool supports(const GemmArgs<__nv_bfloat16> &args);
+  void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
+};
+
 // k1_t_x — isolated code-generation variant of k1_t<64, 64, 16>.
 struct k1_t_x {
   static constexpr std::string_view name() { return "k1_t_x"; }
