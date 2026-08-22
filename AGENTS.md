@@ -141,6 +141,26 @@ Results are written to `results/` and can be ingested into the SQLite dashboard 
 
 When validating code, the model must run the produced executable where practical, including `./build/kernel_smoke` after building it. Direct `./build/gemm_y` runs are suitable for quick checks only; reproducible performance claims require the clock-locked wrapper. Do not run commands requiring `sudo`; the user will run commands such as `sudo scripts/bench.sh`.
 
+### Docker environment parity check
+
+Docker is a local sanity-check environment for establishing parity with the
+remote RunPod software stack. It is not required for normal local development
+or testing; host builds remain the default workflow.
+
+The current parity image is:
+
+```text
+runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
+```
+
+The root-level `Dockerfile` is intentionally minimal. It uses the image above,
+sets `/workspace/gemm_y` as the working directory, and expects the source to be
+mounted at runtime. `.dockerignore` excludes local and generated state. GPU
+parity checks use Docker's `--gpus all` option and should configure the selected
+architecture, build `kernel_smoke`, and run it. Do not place credentials, SSH
+keys, API tokens, or sensitive environment variables in the image or Docker
+configuration.
+
 ### Remote GPU validation
 
 Remote validation is currently manual and container-based. First reproduce the

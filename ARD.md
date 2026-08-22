@@ -31,6 +31,7 @@
 21. Custom-only ingestion and focused kernel smoke tests
 22. Active kernels, one-off tuning, and source-level dispatch
 23. Remote GPU validation and architecture-specific execution (superseded)
+24. Docker environment parity check
 
 ---
 
@@ -1494,3 +1495,40 @@ workflow is validated.
 The temporary `refs/` directory was also removed. Any future `tcgen05` work
 requires a new architecture decision with defined hardware, instruction,
 layout, build, and correctness contracts.
+
+---
+
+## 24. Docker environment parity check
+
+### Decision
+
+Docker is used as a local sanity check to establish parity with the remote
+RunPod software environment. It is not a requirement for normal local builds
+or tests. The host workflow remains the default for development, smoke tests,
+full tests, and benchmark execution.
+
+The parity image is:
+
+```text
+runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
+```
+
+The repository uses a minimal root-level `Dockerfile` based on that image and a
+`.dockerignore` that excludes local and generated state. The source repository
+is mounted at runtime, while the host-visible `build/` directory receives
+configured and generated build output. GPU access is provided explicitly with
+Docker's `--gpus all` option.
+
+The initial verification sequence is intentionally one end-to-end check:
+container image build, GPU-backed container startup, CMake configuration for
+`sm_120`, `kernel_smoke` compilation, and `kernel_smoke` execution. A successful
+run establishes that the image can compile and execute the current project on
+the local GPU; it does not replace ordinary host testing or constitute remote
+hardware validation.
+
+### Validation
+
+The local parity image was built and verified successfully. CUDA 12.8.1 and
+`nvcc` 12.8.93 were detected, CMake configured the `sm_120` build, the
+`kernel_smoke` target compiled, and all 15 smoke rows across three sizes passed
+with zero reported relative error.
