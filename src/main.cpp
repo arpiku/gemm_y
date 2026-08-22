@@ -144,6 +144,7 @@ void profile_bf16_kernels(const std::string &arch) {
       gemm_y::k3_tma_mma_pipe::supports);
   kernels.emplace_back(std::string(gemm_y::k3_tma_mma_pipe::name()),
                        std::string(gemm_y::k3_tma_mma_pipe::description()));
+
 #else
   register_bf16_kernel<gemm_y::NaiveGemm<T>>(prof, kernels);
 #if defined(CUDA_ARCH_SM_90)
