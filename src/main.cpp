@@ -131,8 +131,12 @@ void profile_bf16_kernels(const std::string &arch) {
   register_bf16_kernel<gemm_y::k_tcgen05x>(prof, kernels);
 #elif defined(CUDA_ARCH_SM_120)
   register_bf16_kernel<gemm_y::k1_dispatch>(prof, kernels);
+  register_bf16_kernel<gemm_y::k2_tma>(prof, kernels);
 #else
   register_bf16_kernel<gemm_y::NaiveGemm<T>>(prof, kernels);
+#if defined(CUDA_ARCH_SM_90)
+  register_bf16_kernel<gemm_y::k0>(prof, kernels);
+#endif
 #endif
 
 #if defined(CUDA_ARCH_SM_100)

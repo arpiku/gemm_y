@@ -1,4 +1,4 @@
-// tests/kernel_smoke.cu — fast smoke test for newly added sm120 bf16 kernels.
+// tests/kernel_smoke.cu — focused BF16 correctness and dispatch smoke test.
 
 #include <cstdio>
 #include <cstdlib>
@@ -14,7 +14,7 @@
 #include "dtypes.h"
 
 #if defined(CUDA_ARCH_SM_90)
-#error "kernel_smoke currently targets sm_100 and sm_120 bf16 experiments only"
+#include "sm90/gemm_bf16.cuh"
 #elif defined(CUDA_ARCH_SM_100)
 #include "sm100/gemm_bf16.cuh"
 #include "sm100/k1_dispatch.cuh"
@@ -25,12 +25,12 @@
 #error "kernel_smoke requires a supported CUDA architecture"
 #endif
 
-template <typename Kernel> bool check_padded_kernel(const char *label) {
+template <typename Kernel, int MValue = 37, int NValue = 64, int KValue = 29>
+bool check_padded_kernel(const char *label) {
   using T = gemm_y::dtypes::bf16;
-  constexpr int M = 37;
-  // N=64 is a supported dispatch size; M and K remain boundary-sensitive.
-  constexpr int N = 64;
-  constexpr int K = 29;
+  constexpr int M = MValue;
+  constexpr int N = NValue;
+  constexpr int K = KValue;
   constexpr int ldA = M + 5;
   constexpr int ldB = K + 7;
   constexpr int ldC = M + 9;
@@ -85,7 +85,32 @@ template <typename Kernel> bool check_padded_kernel(const char *label) {
 
 int main() {
   using T = gemm_y::dtypes::bf16;
-#if defined(CUDA_ARCH_SM_100)
+#if defined(CUDA_ARCH_SM_90)
+  const std::vector<int> sizes = {32, 96, 128};
+  gemm_y::Profiler<T> profiler;
+  profiler.register_kernel<gemm_y::k0>();
+  const gemm_y::SweepResult result = profiler.run_sweep(sizes);
+  constexpr std::size_t kExpectedRowsPerN = 2;
+  if (result.rows.size() != sizes.size() * kExpectedRowsPerN)
+    return EXIT_FAILURE;
+  for (const int size : sizes) {
+    bool has_cublas = false;
+    bool has_k0 = false;
+    for (const auto &row : result.rows) {
+      if (row.N != size)
+        continue;
+      has_cublas |= row.kernel_name == "cublas";
+      has_k0 |= row.kernel_name == "k0";
+    }
+    if (!has_cublas || !has_k0)
+      return EXIT_FAILURE;
+  }
+  if (!check_padded_kernel<gemm_y::k0>("k0"))
+    return EXIT_FAILURE;
+  std::printf("sm90 kernel smoke passed: %zu rows across %zu sizes\n",
+              result.rows.size(), sizes.size());
+  return EXIT_SUCCESS;
+#elif defined(CUDA_ARCH_SM_100)
   const std::vector<int> sizes = {256, 512};
   gemm_y::Profiler<T> profiler;
   profiler.register_kernel<gemm_y::k1_dispatch>();
@@ -145,7 +170,8 @@ int main() {
       return EXIT_FAILURE;
   }
   if (!check_padded_kernel<gemm_y::k1_smem>("k1_smem") ||
-      !check_padded_kernel<gemm_y::k1_dispatch>("k1_dispatch"))
+      !check_padded_kernel<gemm_y::k1_dispatch>("k1_dispatch") ||
+      !check_padded_kernel<gemm_y::k2_tma, 64, 64, 64>("k2_tma"))
     return EXIT_FAILURE;
   if (gemm_y::k1_dispatch::selected_kernel_name(999) != "k1_smem")
     return EXIT_FAILURE;

@@ -54,6 +54,7 @@ void k0::operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const {
   k0_gemm_kernel<<<grid, block, 0, stream>>>(
       args.A.ptr, args.B.ptr, args.C.ptr, args.C.rows, args.C.cols, args.A.cols,
       args.A.ld, args.B.ld, args.C.ld);
+  CUDA_CHECK_LAST_ERROR();
 }
 
 } // namespace gemm_y

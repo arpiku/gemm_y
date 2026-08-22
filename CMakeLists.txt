@@ -147,10 +147,10 @@ find_package(CUDAToolkit REQUIRED)
 enable_testing()
 
 # ---------------------------------------------------------------------------
-# Arch-specific source directories (prepared, not populated)
+# Arch-specific source directories
 # ---------------------------------------------------------------------------
-# When src/sm90/ or src/sm120/ gain .cu files, only the directory matching the
-# selected arch is compiled in. Keeps "one binary per arch" clean.
+# Only the directory matching the selected arch is compiled in. This keeps
+# each binary architecture-specific and avoids cross-architecture symbols.
 set(_gemm_y_arch_src_dir "${CMAKE_CURRENT_SOURCE_DIR}/src/${GEMM_Y_CUDA_ARCH}")
 # Directory naming convention is sm90 / sm120 (no underscore), while the
 # GEMM_Y_CUDA_ARCH cache variable uses the canonical sm_90 / sm_120 form.
@@ -205,9 +205,8 @@ add_test(NAME test_cuda COMMAND test_cuda)
 # Focused kernel smoke target
 # ---------------------------------------------------------------------------
 # Keep this target separate from test_cuda so it can be run before the broader
-# test suite. sm100 uses aligned tcgen05 smoke sizes; sm120 retains its existing
-# boundary-focused smoke coverage.
-if(GEMM_Y_CUDA_ARCH STREQUAL "sm_100" OR GEMM_Y_CUDA_ARCH STREQUAL "sm_120")
+# test suite. Each architecture selects its own focused smoke coverage.
+if(GEMM_Y_CUDA_ARCH STREQUAL "sm_90" OR GEMM_Y_CUDA_ARCH STREQUAL "sm_100" OR GEMM_Y_CUDA_ARCH STREQUAL "sm_120")
     add_executable(kernel_smoke
         tests/kernel_smoke.cu
         ${_gemm_y_arch_sources}

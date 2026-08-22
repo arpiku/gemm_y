@@ -52,6 +52,16 @@ struct k1_smem {
   void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
 };
 
+// k2_tma — TMA-fed shared-memory tile with scalar FP32 accumulation.
+struct k2_tma {
+  static constexpr std::string_view name() { return "k2_tma"; }
+  static constexpr std::string_view description() {
+    return "bf16 TMA GEMM; 64x64x16 tile; 16x16 block; 4x4/thread; "
+           "single-stage mbarrier; scalar fp32 accum; k1_smem fallback";
+  }
+  void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
+};
+
 // k1_t_x — isolated code-generation variant of k1_t<64, 64, 16>.
 struct k1_t_x {
   static constexpr std::string_view name() { return "k1_t_x"; }
