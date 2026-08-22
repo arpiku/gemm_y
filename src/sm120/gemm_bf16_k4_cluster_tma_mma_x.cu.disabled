@@ -1,8 +1,8 @@
-// gemm_bf16_k3_tma_mma_pipe.cu — sm120 BF16 pipelined TMA + MMA candidate.
+// gemm_bf16_k4_cluster_tma_mma_x.cu — retired sm120 cluster experiment.
 //
-// TMA stages two 64x16 A tiles and two 16x64 B tiles. Each warp computes a
-// 16x32 output tile using four explicit m16n8k16 BF16 MMA operations while the
-// next K tile is transferred asynchronously.
+// A 1x2 CTA cluster multicasts each 64x16 A tile across adjacent N tiles.
+// B remains a CTA-local 16x64 TMA load. Each warp computes 16x32 using four
+// explicit m16n8k16 BF16 MMA operations.
 
 #include "gemm_bf16.cuh"
 
@@ -10,12 +10,15 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include <cooperative_groups.h>
+
 #include "CudaCheck.h"
 #include "bench/GemmArgs.h"
 #include "cuda_compat.h"
 
 namespace gemm_y {
 namespace {
+namespace cg = cooperative_groups;
 
 constexpr int kTileM = 64;
 constexpr int kTileN = 64;
@@ -31,7 +34,6 @@ constexpr int kMmaN = 8;
 constexpr int kMmaCountN = kWarpTileN / kMmaN;
 
 constexpr int kBytesPerElement = sizeof(__nv_bfloat16);
-constexpr int kPipelineStages = 2;
 constexpr int kBytesPerStage =
     (kTileM * kTileK + kTileK * kTileN) * kBytesPerElement;
 
@@ -74,23 +76,24 @@ __device__ inline void tma_load_2d(void *destination, const CUtensorMap *map,
                : "memory");
 }
 
-// Load a 16x16 BF16 A tile and a 16x8 BF16 B tile into the register layout
-// consumed by mma.sync.aligned.m16n8k16. The shared tiles are column-major.
-__device__ inline void issue_tma_stage(const CUtensorMap *a_map,
-                                       const CUtensorMap *b_map,
-                                       __nv_bfloat16 *As, __nv_bfloat16 *Bs,
-                                       int block_row, int block_col, int k0,
-                                       uint64_t *barrier) {
-  const unsigned address = __cvta_generic_to_shared(barrier);
-  asm volatile("mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, "
-               "[%0], %1;"
+__device__ inline void tma_load_2d_multicast(void *destination,
+                                             const CUtensorMap *map, int x,
+                                             int y, uint64_t *barrier,
+                                             uint16_t cta_mask) {
+  const unsigned destination_address = __cvta_generic_to_shared(destination);
+  const unsigned barrier_address = __cvta_generic_to_shared(barrier);
+  const int coordinates[2] = {x, y};
+  asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.tile."
+               "mbarrier::complete_tx::bytes.multicast::cluster "
+               "[%0], [%1, {%2, %3}], [%4], %5;"
                :
-               : "r"(address), "r"(kBytesPerStage)
+               : "r"(destination_address), "l"(map), "r"(coordinates[0]),
+                 "r"(coordinates[1]), "r"(barrier_address), "h"(cta_mask)
                : "memory");
-  tma_load_2d(As, a_map, block_row, k0, barrier);
-  tma_load_2d(Bs, b_map, k0, block_col, barrier);
 }
 
+// Load a 16x16 BF16 A tile and a 16x8 BF16 B tile into the register layout
+// consumed by mma.sync.aligned.m16n8k16. The shared tiles are column-major.
 __device__ inline void load_mma_a(const __nv_bfloat16 *As, int warp_m,
                                   unsigned (&a)[4]) {
   const int tid =
@@ -139,14 +142,15 @@ __device__ inline void mma_m16n8k16(const unsigned (&a)[4],
 }
 
 __global__ void
-k3_tma_mma_pipe_gemm_kernel(const __grid_constant__ CUtensorMap a_map,
-                            const __grid_constant__ CUtensorMap b_map,
-                            __nv_bfloat16 *C, int M, int N, int K, int ldC) {
+k4_cluster_tma_mma_x_gemm_kernel(const __grid_constant__ CUtensorMap a_map,
+                                 const __grid_constant__ CUtensorMap b_map,
+                                 __nv_bfloat16 *C, int M, int N, int K,
+                                 int ldC) {
   extern __shared__ __align__(128) unsigned char storage[];
   auto *const shared = reinterpret_cast<__nv_bfloat16 *>(storage);
   auto *const As = shared;
-  auto *const Bs = As + kPipelineStages * kTileM * kTileK;
-  __shared__ uint64_t barriers[kPipelineStages];
+  auto *const Bs = As + kTileM * kTileK;
+  __shared__ uint64_t barrier;
 
   const int tx = static_cast<int>(threadIdx.x);
   const int ty = static_cast<int>(threadIdx.y);
@@ -156,46 +160,50 @@ k3_tma_mma_pipe_gemm_kernel(const __grid_constant__ CUtensorMap a_map,
   const int warp_n = warp_id / kWarpsM;
   const int block_row = static_cast<int>(blockIdx.x) * kTileM;
   const int block_col = static_cast<int>(blockIdx.y) * kTileN;
+  const cg::cluster_group cluster = cg::this_cluster();
+  const unsigned cluster_rank = cluster.block_rank();
 
   float accum[kMmaCountN][4] = {};
   if (tx == 0 && ty == 0) {
-    for (int stage = 0; stage < kPipelineStages; ++stage)
-      mbarrier_init(&barriers[stage]);
+    mbarrier_init(&barrier);
     asm volatile("fence.mbarrier_init.release.cluster;" : : : "memory");
   }
   __syncthreads();
+  // Every CTA must initialize its local barrier before a multicast can signal
+  // the peer CTA's corresponding barrier.
+  cluster.sync();
 
-  int stage = 0;
-  int phase[kPipelineStages] = {};
-  if (tx == 0 && ty == 0)
-    issue_tma_stage(&a_map, &b_map, As, Bs, block_row, block_col, 0,
-                    &barriers[stage]);
-
+  int phase = 0;
   for (int k0 = 0; k0 < K; k0 += kTileK) {
-    const int next_k0 = k0 + kTileK;
-    const int next_stage = stage ^ 1;
-    // Start the next transfer before waiting on the current stage. This lets
-    // the TMA engine make progress while the current transaction drains and
-    // while this stage is consumed by MMA below.
-    if (next_k0 < K && tx == 0 && ty == 0) {
-      issue_tma_stage(&a_map, &b_map, As + next_stage * kTileM * kTileK,
-                      Bs + next_stage * kTileK * kTileN, block_row, block_col,
-                      next_k0, &barriers[next_stage]);
+    if (tx == 0 && ty == 0) {
+      const unsigned address = __cvta_generic_to_shared(&barrier);
+      asm volatile("mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, "
+                   "[%0], %1;"
+                   :
+                   : "r"(address), "r"(kBytesPerStage)
+                   : "memory");
+      if (cluster_rank % 2 == 0) {
+        tma_load_2d_multicast(As, &a_map, block_row, k0, &barrier, 0x3);
+      }
+      tma_load_2d(Bs, &b_map, k0, block_col, &barrier);
     }
 
-    mbarrier_wait(&barriers[stage], phase[stage]);
-    phase[stage] ^= 1;
+    // The local mbarrier completion covers both the multicast A transfer and
+    // the CTA-local B transfer; no additional cluster rendezvous is needed.
+    mbarrier_wait(&barrier, phase);
+    phase ^= 1;
 
     unsigned a[4];
-    load_mma_a(As + stage * kTileM * kTileK, warp_m, a);
+    load_mma_a(As, warp_m, a);
     for (int mma_n = 0; mma_n < kMmaCountN; ++mma_n) {
       unsigned b[2];
-      load_mma_b(Bs + stage * kTileK * kTileN,
-                 warp_n * kWarpTileN + mma_n * kMmaN, b);
+      load_mma_b(Bs, warp_n * kWarpTileN + mma_n * kMmaN, b);
       mma_m16n8k16(a, b, accum[mma_n]);
     }
     __syncthreads();
-    stage = next_stage;
+    // A is multicast into both CTAs' single shared buffer. Do not allow the
+    // source CTA to overwrite it until the peer has finished this iteration.
+    cluster.sync();
   }
 
   const int lane = tid & (kWarpSize - 1);
@@ -236,7 +244,8 @@ void encode_map(CUtensorMap *map, const __nv_bfloat16 *pointer, int rows,
   if (status != CUDA_SUCCESS) {
     const char *message = nullptr;
     (void)cuGetErrorString(status, &message);
-    std::fprintf(stderr, "k3_tma_mma_pipe: cuTensorMapEncodeTiled failed: %s\n",
+    std::fprintf(stderr,
+                 "k4_cluster_tma_mma_x: cuTensorMapEncodeTiled failed: %s\n",
                  message == nullptr ? "unknown error" : message);
     std::abort();
   }
@@ -244,7 +253,7 @@ void encode_map(CUtensorMap *map, const __nv_bfloat16 *pointer, int rows,
 
 } // namespace
 
-bool k3_tma_mma_pipe::supports(const GemmArgs<__nv_bfloat16> &args) {
+bool k4_cluster_tma_mma_x::supports(const GemmArgs<__nv_bfloat16> &args) {
   constexpr int kTmaStrideAlignmentBytes = 16;
   const bool aligned = (args.A.ld * static_cast<int>(sizeof(__nv_bfloat16))) %
                                kTmaStrideAlignmentBytes ==
@@ -252,16 +261,18 @@ bool k3_tma_mma_pipe::supports(const GemmArgs<__nv_bfloat16> &args) {
                        (args.B.ld * static_cast<int>(sizeof(__nv_bfloat16))) %
                                kTmaStrideAlignmentBytes ==
                            0;
+  const int grid_n = args.C.cols / kTileN;
   return args.C.rows % kTileM == 0 && args.C.cols % kTileN == 0 &&
-         args.A.cols % kTileK == 0 && args.A.rows == args.C.rows &&
-         args.B.rows == args.A.cols && args.B.cols == args.C.cols && aligned;
+         grid_n % 2 == 0 && args.A.cols % kTileK == 0 &&
+         args.A.rows == args.C.rows && args.B.rows == args.A.cols &&
+         args.B.cols == args.C.cols && aligned;
 }
 
-void k3_tma_mma_pipe::operator()(GemmArgs<__nv_bfloat16> args,
-                                 cudaStream_t stream) const {
+void k4_cluster_tma_mma_x::operator()(GemmArgs<__nv_bfloat16> args,
+                                      cudaStream_t stream) const {
   if (!supports(args)) {
     std::fprintf(stderr,
-                 "k3_tma_mma_pipe: unsupported shape or stride; profiler "
+                 "k4_cluster_tma_mma_x: unsupported shape or stride; profiler "
                  "should "
                  "skip this invocation\n");
     std::abort();
@@ -275,20 +286,29 @@ void k3_tma_mma_pipe::operator()(GemmArgs<__nv_bfloat16> args,
              kTileN);
 
   constexpr std::size_t shared_bytes =
-      static_cast<std::size_t>(kPipelineStages) *
       static_cast<std::size_t>(kTileM * kTileK + kTileK * kTileN) *
       sizeof(__nv_bfloat16);
   const dim3 grid((args.C.rows + kTileM - 1) / kTileM,
                   (args.C.cols + kTileN - 1) / kTileN, 1);
   const dim3 block(kThreadsX, kThreadsY, 1);
 
-  auto kernel = k3_tma_mma_pipe_gemm_kernel;
+  auto kernel = k4_cluster_tma_mma_x_gemm_kernel;
   CUDA_CHECK(cudaFuncSetAttribute(kernel,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize,
                                   static_cast<int>(shared_bytes)));
-  kernel<<<grid, block, shared_bytes, stream>>>(a_map, b_map, args.C.ptr,
-                                                args.C.rows, args.C.cols,
-                                                args.A.cols, args.C.ld);
+  cudaLaunchConfig_t config{};
+  config.gridDim = grid;
+  config.blockDim = block;
+  config.dynamicSmemBytes = shared_bytes;
+  config.stream = stream;
+  cudaLaunchAttribute cluster_attribute{};
+  cluster_attribute.id = cudaLaunchAttributeClusterDimension;
+  cluster_attribute.val.clusterDim = {1, 2, 1};
+  config.attrs = &cluster_attribute;
+  config.numAttrs = 1;
+  CUDA_CHECK(cudaLaunchKernelEx(&config, kernel, a_map, b_map, args.C.ptr,
+                                args.C.rows, args.C.cols, args.A.cols,
+                                args.C.ld));
   CUDA_CHECK_LAST_ERROR();
 }
 
