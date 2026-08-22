@@ -80,6 +80,7 @@ public:
     struct Entry {
         std::string name;
         std::string description;
+        std::function<bool(const GemmArgs<T>&)> supports;
         std::function<void(GemmArgs<T>, cudaStream_t)> run;
     };
 
@@ -109,6 +110,24 @@ public:
         Entry e;
         e.name = std::string(K::name());
         e.description = std::string(K::description());
+        e.supports = [](const GemmArgs<T>&) { return true; };
+        e.run = [](GemmArgs<T> args, cudaStream_t s) {
+            K{}(args, s);
+        };
+        kernels_.push_back(std::move(e));
+    }
+
+    // Register a kernel with a domain predicate. Unsupported cases are
+    // reported as skips and are not timed or emitted as result rows.
+    template <typename K>
+    void register_kernel_if(std::function<bool(const GemmArgs<T>&)> supports) {
+        static_assert(KernelTraits_v<K, T>,
+                      "K does not satisfy KernelTraits<T> (needs name(), "
+                      "description(), and operator()(GemmArgs<T>, cudaStream_t) const).");
+        Entry e;
+        e.name = std::string(K::name());
+        e.description = std::string(K::description());
+        e.supports = std::move(supports);
         e.run = [](GemmArgs<T> args, cudaStream_t s) {
             K{}(args, s);
         };

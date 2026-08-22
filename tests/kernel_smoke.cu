@@ -25,15 +25,17 @@
 #error "kernel_smoke requires a supported CUDA architecture"
 #endif
 
-template <typename Kernel, int MValue = 37, int NValue = 64, int KValue = 29>
+template <typename Kernel, int MValue = 37, int NValue = 64, int KValue = 29,
+          int LdAValue = MValue + 5, int LdBValue = KValue + 7,
+          int LdCValue = MValue + 9>
 bool check_padded_kernel(const char *label) {
   using T = gemm_y::dtypes::bf16;
   constexpr int M = MValue;
   constexpr int N = NValue;
   constexpr int K = KValue;
-  constexpr int ldA = M + 5;
-  constexpr int ldB = K + 7;
-  constexpr int ldC = M + 9;
+  constexpr int ldA = LdAValue;
+  constexpr int ldB = LdBValue;
+  constexpr int ldC = LdCValue;
 
   gemm_y::Buffer<T, gemm_y::Space::Host> hA(static_cast<std::size_t>(ldA) * K);
   gemm_y::Buffer<T, gemm_y::Space::Host> hB(static_cast<std::size_t>(ldB) * N);
@@ -171,7 +173,7 @@ int main() {
   }
   if (!check_padded_kernel<gemm_y::k1_smem>("k1_smem") ||
       !check_padded_kernel<gemm_y::k1_dispatch>("k1_dispatch") ||
-      !check_padded_kernel<gemm_y::k2_tma, 64, 64, 64>("k2_tma"))
+      !check_padded_kernel<gemm_y::k2_tma, 64, 64, 64, 72, 72, 73>("k2_tma"))
     return EXIT_FAILURE;
   if (gemm_y::k1_dispatch::selected_kernel_name(999) != "k1_smem")
     return EXIT_FAILURE;

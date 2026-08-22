@@ -57,8 +57,9 @@ struct k2_tma {
   static constexpr std::string_view name() { return "k2_tma"; }
   static constexpr std::string_view description() {
     return "bf16 TMA GEMM; 64x64x16 tile; 16x16 block; 4x4/thread; "
-           "single-stage mbarrier; scalar fp32 accum; k1_smem fallback";
+           "single-stage mbarrier; scalar fp32 accum; aligned full tiles only";
   }
+  static bool supports(const GemmArgs<__nv_bfloat16> &args);
   void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
 };
 

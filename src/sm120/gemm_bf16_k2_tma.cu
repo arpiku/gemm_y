@@ -160,8 +160,7 @@ void encode_map(CUtensorMap *map, const __nv_bfloat16 *pointer, int rows,
 
 } // namespace
 
-void k2_tma::operator()(GemmArgs<__nv_bfloat16> args,
-                        cudaStream_t stream) const {
+bool k2_tma::supports(const GemmArgs<__nv_bfloat16> &args) {
   constexpr int kTmaStrideAlignmentBytes = 16;
   const bool tma_stride_aligned =
       (args.A.ld * static_cast<int>(sizeof(__nv_bfloat16))) %
@@ -170,15 +169,19 @@ void k2_tma::operator()(GemmArgs<__nv_bfloat16> args,
       (args.B.ld * static_cast<int>(sizeof(__nv_bfloat16))) %
               kTmaStrideAlignmentBytes ==
           0;
-  if (args.C.rows % kTileM != 0 || args.C.cols % kTileN != 0 ||
-      args.A.cols % kTileK != 0 || args.A.rows != args.C.rows ||
-      args.B.rows != args.A.cols || args.B.cols != args.C.cols ||
-      !tma_stride_aligned) {
-    // TMA OOB fill is not scalar zero-fill. Keep the candidate safe for the
-    // full sweep by using the existing tiled implementation outside the
-    // aligned TMA domain.
-    k1_smem{}(args, stream);
-    return;
+  return args.C.rows % kTileM == 0 && args.C.cols % kTileN == 0 &&
+         args.A.cols % kTileK == 0 && args.A.rows == args.C.rows &&
+         args.B.rows == args.A.cols && args.B.cols == args.C.cols &&
+         tma_stride_aligned;
+}
+
+void k2_tma::operator()(GemmArgs<__nv_bfloat16> args,
+                        cudaStream_t stream) const {
+  if (!supports(args)) {
+    std::fprintf(stderr,
+                 "k2_tma: unsupported shape or stride; profiler should skip "
+                 "this invocation\n");
+    std::abort();
   }
 
   CUtensorMap a_map{};
