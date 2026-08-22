@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # Edit these connection values before using the remote commands.
 REMOTE_HOST="74.2.96.30"
-REMOTE_PORT="18007"
+REMOTE_PORT="10381"
 REMOTE_USER="root"
 SSH_KEY="${HOME}/.ssh/id_ed25519"
 
@@ -25,6 +25,8 @@ Commands:
   upload       Upload the packed source archive to /workspace.
   run-smoke    Replace the remote source tree, build, and run kernel_smoke.
   run-bench    Build and run the full gemm_y benchmark remotely.
+  run-bench-locked
+               Build and run the benchmark with the graphics clock locked.
   fetch        Copy remote logs and results back to the local machine.
   help         Show this help text.
 
@@ -37,8 +39,12 @@ Workflow:
   ./rtest run-bench
   ./rtest fetch
 
+For a clock-controlled benchmark:
+  ./rtest run-bench-locked
+  ./rtest fetch
+
 Edit REMOTE_HOST, REMOTE_PORT, and SSH_KEY at the top of this script before
-using connect, upload, run-smoke, run-bench, or fetch.
+using connect, upload, run-smoke, run-bench, run-bench-locked, or fetch.
 USAGE
 }
 
@@ -177,19 +183,88 @@ arch="$3"
 
 rm -rf "$root"
 mkdir -p "$root" "$root/logs" "$root/results"
-tar -xzf "$archive" -C "$root"
 cd "$root"
+
+phase="archive-extract"
+status_file="$root/logs/status.log"
+started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+set_phase() {
+    phase="$1"
+}
+
+capture_toolchain() {
+    {
+        printf 'captured_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'hostname='; hostname || true
+        printf 'user='; id -un || true
+        printf 'working_directory=%s\n' "$PWD"
+        printf 'uname='; uname -a || true
+        if [[ -f /etc/os-release ]]; then cat /etc/os-release; fi
+        printf '\n[nvcc path]\n'; command -v nvcc || true
+        printf '\n[nvcc version]\n'; nvcc --version || true
+        printf '\n[cmake version]\n'; cmake --version || true
+        printf '\n[gcc version]\n'; gcc --version || true
+        printf '\n[g++ version]\n'; g++ --version || true
+        printf '\n[selected environment]\n'
+        printf 'CUDACXX=%s\n' "${CUDACXX-}"
+        printf 'CUDA_PATH=%s\n' "${CUDA_PATH-}"
+        printf 'CUDA_HOME=%s\n' "${CUDA_HOME-}"
+        printf 'CUDA_VISIBLE_DEVICES=%s\n' "${CUDA_VISIBLE_DEVICES-}"
+    } > "$root/logs/toolchain.log" 2>&1
+}
+
+capture_gpu() {
+    local output="$1"
+    {
+        printf '[nvidia-smi]\n'; nvidia-smi
+        printf '\n[query]\n'
+        nvidia-smi --query-gpu=name,uuid,compute_cap,driver_version,temperature.gpu,power.draw,pstate,clocks.current.graphics,clocks.max.graphics,memory.total,memory.used --format=csv,noheader
+    } > "$root/logs/${output}.log" 2>&1 || true
+}
+
+write_status() {
+    local final_status="$1"
+    local final_code="$2"
+    {
+        printf 'status=%s\n' "$final_status"
+        printf 'phase=%s\n' "$phase"
+        printf 'exit_code=%s\n' "$final_code"
+        printf 'started_at=%s\n' "$started_at"
+        printf 'finished_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'benchmark_mode=smoke\n'
+    } > "$status_file"
+}
+
+finish() {
+    local command_status=$?
+    trap - EXIT
+    if (( command_status == 0 )); then
+        write_status passed 0
+    else
+        write_status failed "$command_status"
+    fi
+    exit "$command_status"
+}
+trap finish EXIT
+
+tar -xzf "$archive" -C "$root"
+capture_gpu gpu-before
 
 run_logged() {
     local name="$1"
     shift
     set +e
     "$@" 2>&1 | tee "$root/logs/${name}.log"
-    local command_status="${PIPESTATUS[0]}"
+    local -a pipeline_status=("${PIPESTATUS[@]}")
     set -e
-    return "$command_status"
+    if (( pipeline_status[0] != 0 )); then
+        return "${pipeline_status[0]}"
+    fi
+    return "${pipeline_status[1]}"
 }
 
+set_phase toolchain
 if [[ -x /usr/local/cuda/bin/nvcc ]]; then
     export CUDACXX="/usr/local/cuda/bin/nvcc"
 elif command -v nvcc >/dev/null 2>&1; then
@@ -207,15 +282,19 @@ case "$arch" in
         exit 4
         ;;
 esac
+capture_toolchain
 
+set_phase configure
 run_logged configure \
     cmake -S "$root" \
           -B "$root/build" \
           -DGEMM_Y_CUDA_ARCH="$arch" \
           -DCMAKE_CUDA_ARCHITECTURES="$cmake_arch" \
           -DCMAKE_CUDA_COMPILER="$CUDACXX"
+set_phase build-smoke
 run_logged build-smoke \
     cmake --build "$root/build" --target kernel_smoke -j
+set_phase smoke
 run_logged smoke "$root/build/kernel_smoke"
 
 printf 'Remote kernel smoke passed.\n'
@@ -227,37 +306,185 @@ run_bench() {
     require_configured_host
 
     printf 'Building and running the full benchmark remotely...\n'
-    run_ssh bash -s -- "${REMOTE_ROOT}" <<'REMOTE_BENCH'
+    run_bench_remote normal
+}
+
+run_bench_locked() {
+    require_command ssh
+    require_configured_host
+
+    printf 'Building and running the clock-locked benchmark remotely...\n'
+    run_bench_remote locked
+}
+
+run_bench_remote() {
+    local mode="$1"
+    run_ssh bash -s -- "${REMOTE_ROOT}" "${mode}" <<'REMOTE_BENCH'
 set -Eeuo pipefail
 
 root="$1"
+mode="$2"
 [[ "$root" == "/workspace/gemm_y" ]] || {
     printf 'refusing unsafe remote root: %s\n' "$root" >&2
     exit 2
 }
-[[ -d "$root/source" || -f "$root/CMakeLists.txt" ]] || {
-    printf 'remote source tree is missing; run ./rtest run-smoke first\n' >&2
+[[ -f "$root/CMakeLists.txt" && -d "$root/build" ]] || {
+    printf 'remote source/build tree is missing; run ./rtest run-smoke first\n' >&2
     exit 3
+}
+[[ "$mode" == "normal" || "$mode" == "locked" ]] || {
+    printf 'unsupported benchmark mode: %s\n' "$mode" >&2
+    exit 4
 }
 
 mkdir -p "$root/logs" "$root/results"
 cd "$root"
+
+phase="setup"
+status_file="$root/logs/status.log"
+clock_log="$root/logs/clock.log"
+clock_locked=0
+persistence_enabled=0
+started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+set_phase() {
+    phase="$1"
+}
+
+capture_toolchain() {
+    {
+        printf 'captured_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'hostname='; hostname || true
+        printf 'user='; id -un || true
+        printf 'working_directory=%s\n' "$PWD"
+        printf 'uname='; uname -a || true
+        if [[ -f /etc/os-release ]]; then
+            cat /etc/os-release
+        fi
+        printf '\n[nvcc path]\n'
+        command -v nvcc || true
+        printf '\n[nvcc version]\n'
+        nvcc --version || true
+        printf '\n[cmake version]\n'
+        cmake --version || true
+        printf '\n[gcc version]\n'
+        gcc --version || true
+        printf '\n[g++ version]\n'
+        g++ --version || true
+        printf '\n[selected environment]\n'
+        printf 'CUDACXX=%s\n' "${CUDACXX-}"
+        printf 'CUDA_PATH=%s\n' "${CUDA_PATH-}"
+        printf 'CUDA_HOME=%s\n' "${CUDA_HOME-}"
+        printf 'CUDA_VISIBLE_DEVICES=%s\n' "${CUDA_VISIBLE_DEVICES-}"
+    } > "$root/logs/toolchain.log" 2>&1
+}
+
+capture_gpu() {
+    local output="$1"
+    {
+        printf '[nvidia-smi]\n'
+        nvidia-smi
+        printf '\n[query]\n'
+        nvidia-smi --query-gpu=name,uuid,compute_cap,driver_version,temperature.gpu,power.draw,pstate,clocks.current.graphics,clocks.max.graphics,memory.total,memory.used --format=csv,noheader
+    } > "$root/logs/${output}.log" 2>&1 || true
+}
+
+write_status() {
+    local final_status="$1"
+    local final_code="$2"
+    {
+        printf 'status=%s\n' "$final_status"
+        printf 'phase=%s\n' "$phase"
+        printf 'exit_code=%s\n' "$final_code"
+        printf 'started_at=%s\n' "$started_at"
+        printf 'finished_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'benchmark_mode=%s\n' "$mode"
+    } > "$status_file"
+}
+
+finish() {
+    local command_status=$?
+    trap - EXIT
+    local cleanup_status=0
+
+    if [[ "$mode" == "locked" ]]; then
+        set +e
+        if (( clock_locked )); then
+            set_phase clock-reset
+            printf '[reset graphics clock]\n' >> "$clock_log"
+            nvidia-smi -i 0 -rgc >> "$clock_log" 2>&1 || cleanup_status=1
+        fi
+        if (( persistence_enabled )); then
+            printf '[disable persistence mode]\n' >> "$clock_log"
+            nvidia-smi -i 0 -pm 0 >> "$clock_log" 2>&1 || cleanup_status=1
+        fi
+        set -e
+        capture_gpu gpu-after
+    fi
+
+    if (( command_status == 0 && cleanup_status != 0 )); then
+        command_status=1
+    fi
+    if (( command_status == 0 )); then
+        write_status passed 0
+    else
+        write_status failed "$command_status"
+    fi
+    exit "$command_status"
+}
+trap finish EXIT
+
+set_phase toolchain
+if [[ -x /usr/local/cuda/bin/nvcc ]]; then
+    export CUDACXX="/usr/local/cuda/bin/nvcc"
+elif command -v nvcc >/dev/null 2>&1; then
+    export CUDACXX="$(command -v nvcc)"
+else
+    printf 'nvcc was not found in the remote non-interactive environment\n' >&2
+    exit 5
+fi
+capture_toolchain
+capture_gpu gpu-before
 
 run_logged() {
     local name="$1"
     shift
     set +e
     "$@" 2>&1 | tee "$root/logs/${name}.log"
-    local command_status="${PIPESTATUS[0]}"
+    local -a pipeline_status=("${PIPESTATUS[@]}")
     set -e
-    return "$command_status"
+    if (( pipeline_status[0] != 0 )); then
+        return "${pipeline_status[0]}"
+    fi
+    return "${pipeline_status[1]}"
 }
 
+if [[ "$mode" == "locked" ]]; then
+    set_phase clock-setup
+    : > "$clock_log"
+    printf '[enable persistence mode]\n' >> "$clock_log"
+    nvidia-smi -i 0 -pm 1 >> "$clock_log" 2>&1
+    persistence_enabled=1
+
+    max_graphics_clock="$(nvidia-smi --query-gpu=clocks.max.graphics --format=csv,noheader,nounits | tr -d '[:space:]')"
+    [[ "$max_graphics_clock" =~ ^[0-9]+$ ]] || {
+        printf 'could not determine numeric maximum graphics clock: %s\n' "$max_graphics_clock" >&2
+        exit 5
+    }
+    printf 'max_graphics_clock_mhz=%s\n' "$max_graphics_clock" >> "$clock_log"
+    printf '[lock graphics clock]\n' >> "$clock_log"
+    nvidia-smi -i 0 -lgc "${max_graphics_clock},${max_graphics_clock}" >> "$clock_log" 2>&1
+    clock_locked=1
+    capture_gpu gpu-locked
+fi
+
+set_phase build-benchmark
 run_logged build-benchmark \
     cmake --build "$root/build" --target gemm_y -j
+set_phase benchmark
 run_logged benchmark "$root/build/gemm_y"
 
-printf 'Remote benchmark completed.\n'
+printf 'Remote benchmark completed (%s mode).\n' "$mode"
 REMOTE_BENCH
 }
 
@@ -288,6 +515,7 @@ main() {
         upload) upload ;;
         run-smoke) run_smoke ;;
         run-bench) run_bench ;;
+        run-bench-locked) run_bench_locked ;;
         fetch) fetch ;;
         help|-h|--help) usage ;;
         *) usage >&2; fail "unknown command: ${command}" ;;
