@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# Edit these connection values before using the remote commands.
+REMOTE_HOST="74.2.96.30"
+REMOTE_PORT="18007"
+REMOTE_USER="root"
+SSH_KEY="${HOME}/.ssh/id_ed25519"
+
+REMOTE_ROOT="/workspace/gemm_y"
+REMOTE_ARCHIVE="/workspace/gemm_y-source.tar.gz"
+REMOTE_ARCH="sm_120"
+LOCAL_ARCHIVE="artifacts/rtest/source.tar.gz"
+LOCAL_FETCH_DIR="artifacts/rtest/remote"
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+
+usage() {
+    cat <<'USAGE'
+Usage: ./rtest <command>
+
+Commands:
+  connect      Open an interactive SSH session.
+  pack         Create and inspect the minimal source archive locally.
+  upload       Upload the packed source archive to /workspace.
+  run-smoke    Replace the remote source tree, build, and run kernel_smoke.
+  run-bench    Build and run the full gemm_y benchmark remotely.
+  fetch        Copy remote logs and results back to the local machine.
+  help         Show this help text.
+
+Workflow:
+  ./rtest connect
+  ./rtest pack
+  ./rtest upload
+  ./rtest run-smoke
+  ./rtest fetch
+  ./rtest run-bench
+  ./rtest fetch
+
+Edit REMOTE_HOST, REMOTE_PORT, and SSH_KEY at the top of this script before
+using connect, upload, run-smoke, run-bench, or fetch.
+USAGE
+}
+
+fail() {
+    printf 'rtest: error: %s\n' "$*" >&2
+    exit 1
+}
+
+require_configured_host() {
+    [[ "${REMOTE_HOST}" != "REPLACE_WITH_POD_HOST" ]] || \
+        fail "edit REMOTE_HOST at the top of rtest first"
+    [[ -n "${REMOTE_PORT}" ]] || fail "REMOTE_PORT must not be empty"
+    [[ -n "${REMOTE_USER}" ]] || fail "REMOTE_USER must not be empty"
+    [[ -f "${SSH_KEY}" ]] || fail "SSH key does not exist: ${SSH_KEY}"
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || fail "required command not found: $1"
+}
+
+remote_target() {
+    printf '%s@%s' "${REMOTE_USER}" "${REMOTE_HOST}"
+}
+
+ssh_args() {
+    printf '%s\n' \
+        -i "${SSH_KEY}" \
+        -p "${REMOTE_PORT}" \
+        -o IdentitiesOnly=yes
+}
+
+scp_args() {
+    printf '%s\n' \
+        -i "${SSH_KEY}" \
+        -P "${REMOTE_PORT}" \
+        -o IdentitiesOnly=yes
+}
+
+run_ssh() {
+    local -a args
+    mapfile -t args < <(ssh_args)
+    ssh "${args[@]}" "$(remote_target)" "$@"
+}
+
+run_scp() {
+    local -a args
+    mapfile -t args < <(scp_args)
+    scp "${args[@]}" "$@"
+}
+
+pack() {
+    require_command tar
+    mkdir -p "$(dirname -- "${LOCAL_ARCHIVE}")"
+
+    printf 'Creating source archive: %s\n' "${LOCAL_ARCHIVE}"
+    tar -czf "${LOCAL_ARCHIVE}" \
+        -C "${SCRIPT_DIR}" \
+        CMakeLists.txt \
+        src \
+        tests
+
+    local entries
+    entries="$(tar -tzf "${LOCAL_ARCHIVE}")"
+    [[ -n "${entries}" ]] || fail "archive is empty"
+
+    while IFS= read -r forbidden; do
+        if [[ "${entries}" == *"${forbidden}"* ]]; then
+            fail "forbidden archive entry found: ${forbidden}"
+        fi
+    done <<'FORBIDDEN'
+.git/
+build/
+results/
+db/
+artifacts/
+pyenv/
+refs/
+remote.txt
+Dockerfile
+.dockerignore
+FORBIDDEN
+
+    local file_count archive_size
+    file_count="$(printf '%s\n' "${entries}" | grep -vc '/$' || true)"
+    archive_size="$(wc -c < "${LOCAL_ARCHIVE}")"
+    printf 'Archive ready: %s\n' "${LOCAL_ARCHIVE}"
+    printf 'Archive files: %s\n' "${file_count}"
+    printf 'Archive bytes: %s\n' "${archive_size}"
+}
+
+connect() {
+    require_command ssh
+    require_configured_host
+    printf 'Connecting to %s...\n' "$(remote_target)"
+    local -a args
+    mapfile -t args < <(ssh_args)
+    ssh "${args[@]}" "$(remote_target)"
+}
+
+upload() {
+    require_command scp
+    require_configured_host
+    [[ -f "${LOCAL_ARCHIVE}" ]] || {
+        printf 'Source archive is missing; creating it now.\n'
+        pack
+    }
+    printf 'Uploading %s to %s:%s...\n' \
+        "${LOCAL_ARCHIVE}" "$(remote_target)" "${REMOTE_ARCHIVE}"
+    run_scp "${LOCAL_ARCHIVE}" "$(remote_target):${REMOTE_ARCHIVE}"
+    printf 'Upload complete: %s\n' "${REMOTE_ARCHIVE}"
+}
+
+run_smoke() {
+    require_command ssh
+    require_configured_host
+    [[ -f "${LOCAL_ARCHIVE}" ]] || fail "run ./rtest pack before run-smoke"
+
+    printf 'Replacing remote source tree at %s...\n' "${REMOTE_ROOT}"
+    printf 'Configuring, building, and running kernel_smoke for %s...\n' "${REMOTE_ARCH}"
+
+    run_ssh bash -s -- "${REMOTE_ROOT}" "${REMOTE_ARCHIVE}" "${REMOTE_ARCH}" <<'REMOTE_SMOKE'
+set -Eeuo pipefail
+
+root="$1"
+archive="$2"
+arch="$3"
+
+[[ "$root" == "/workspace/gemm_y" ]] || {
+    printf 'refusing unsafe remote root: %s\n' "$root" >&2
+    exit 2
+}
+[[ -f "$archive" ]] || {
+    printf 'remote archive is missing: %s\n' "$archive" >&2
+    exit 3
+}
+
+rm -rf "$root"
+mkdir -p "$root" "$root/logs" "$root/results"
+tar -xzf "$archive" -C "$root"
+cd "$root"
+
+run_logged() {
+    local name="$1"
+    shift
+    set +e
+    "$@" 2>&1 | tee "$root/logs/${name}.log"
+    local command_status="${PIPESTATUS[0]}"
+    set -e
+    return "$command_status"
+}
+
+if [[ -x /usr/local/cuda/bin/nvcc ]]; then
+    export CUDACXX="/usr/local/cuda/bin/nvcc"
+elif command -v nvcc >/dev/null 2>&1; then
+    export CUDACXX="$(command -v nvcc)"
+else
+    printf 'nvcc was not found in the remote non-interactive environment\n' >&2
+    exit 5
+fi
+
+case "$arch" in
+    sm_90) cmake_arch="90" ;;
+    sm_120) cmake_arch="120" ;;
+    *)
+        printf 'unsupported architecture: %s\n' "$arch" >&2
+        exit 4
+        ;;
+esac
+
+run_logged configure \
+    cmake -S "$root" \
+          -B "$root/build" \
+          -DGEMM_Y_CUDA_ARCH="$arch" \
+          -DCMAKE_CUDA_ARCHITECTURES="$cmake_arch" \
+          -DCMAKE_CUDA_COMPILER="$CUDACXX"
+run_logged build-smoke \
+    cmake --build "$root/build" --target kernel_smoke -j
+run_logged smoke "$root/build/kernel_smoke"
+
+printf 'Remote kernel smoke passed.\n'
+REMOTE_SMOKE
+}
+
+run_bench() {
+    require_command ssh
+    require_configured_host
+
+    printf 'Building and running the full benchmark remotely...\n'
+    run_ssh bash -s -- "${REMOTE_ROOT}" <<'REMOTE_BENCH'
+set -Eeuo pipefail
+
+root="$1"
+[[ "$root" == "/workspace/gemm_y" ]] || {
+    printf 'refusing unsafe remote root: %s\n' "$root" >&2
+    exit 2
+}
+[[ -d "$root/source" || -f "$root/CMakeLists.txt" ]] || {
+    printf 'remote source tree is missing; run ./rtest run-smoke first\n' >&2
+    exit 3
+}
+
+mkdir -p "$root/logs" "$root/results"
+cd "$root"
+
+run_logged() {
+    local name="$1"
+    shift
+    set +e
+    "$@" 2>&1 | tee "$root/logs/${name}.log"
+    local command_status="${PIPESTATUS[0]}"
+    set -e
+    return "$command_status"
+}
+
+run_logged build-benchmark \
+    cmake --build "$root/build" --target gemm_y -j
+run_logged benchmark "$root/build/gemm_y"
+
+printf 'Remote benchmark completed.\n'
+REMOTE_BENCH
+}
+
+fetch() {
+    require_command scp
+    require_configured_host
+    mkdir -p "${LOCAL_FETCH_DIR}"
+    rm -rf "${LOCAL_FETCH_DIR}/logs" "${LOCAL_FETCH_DIR}/results"
+
+    printf 'Fetching remote logs...\n'
+    run_scp -r \
+        "$(remote_target):${REMOTE_ROOT}/logs" \
+        "${LOCAL_FETCH_DIR}/"
+
+    printf 'Fetching remote results...\n'
+    run_scp -r \
+        "$(remote_target):${REMOTE_ROOT}/results" \
+        "${LOCAL_FETCH_DIR}/"
+
+    printf 'Fetch complete: %s\n' "${LOCAL_FETCH_DIR}"
+}
+
+main() {
+    local command="${1:-help}"
+    case "${command}" in
+        connect) connect ;;
+        pack) pack ;;
+        upload) upload ;;
+        run-smoke) run_smoke ;;
+        run-bench) run_bench ;;
+        fetch) fetch ;;
+        help|-h|--help) usage ;;
+        *) usage >&2; fail "unknown command: ${command}" ;;
+    esac
+}
+
+main "$@"
