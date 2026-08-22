@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS runs (
     label        TEXT,
     arch         TEXT NOT NULL,
     dtype        TEXT NOT NULL,
+    hardware_name TEXT,
     source_csv   TEXT NOT NULL,
     source_meta  TEXT NOT NULL,
     warmup_iters INTEGER,
@@ -90,6 +91,7 @@ _MIGRATION_COLUMNS = [
 
 # Columns added for runs that intentionally omit explicit cuBLAS rows.
 _RUN_MIGRATION_COLUMNS = ["custom_only"]
+_RUN_TEXT_MIGRATION_COLUMNS = ["hardware_name"]
 
 
 def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
@@ -119,6 +121,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(
                 f"ALTER TABLE runs ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"
             )
+        except sqlite3.OperationalError:
+            pass  # column already exists
+    for col in _RUN_TEXT_MIGRATION_COLUMNS:
+        try:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
             pass  # column already exists
     conn.commit()
@@ -155,16 +162,17 @@ def insert_run(
     tol: Optional[float],
     sweep_sizes: Optional[str],
     custom_only: bool = False,
+    hardware_name: Optional[str] = None,
 ) -> int:
     """Insert a run row and return its id."""
     with cursor(conn) as cur:
         cur.execute(
             """
             INSERT INTO runs (
-                ingested_at, git_sha, label, arch, dtype,
+                ingested_at, git_sha, label, arch, dtype, hardware_name,
                 source_csv, source_meta,
                 warmup_iters, timed_iters, tol, sweep_sizes, custom_only
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ingested_at,
@@ -172,6 +180,7 @@ def insert_run(
                 label,
                 arch,
                 dtype,
+                hardware_name,
                 source_csv,
                 source_meta,
                 warmup_iters,
@@ -275,7 +284,7 @@ def list_runs(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         cur.execute(
             """
             SELECT r.id, r.ingested_at, r.git_sha, r.label,
-                   r.arch, r.dtype, r.source_csv, r.source_meta,
+                   r.arch, r.dtype, r.hardware_name, r.source_csv, r.source_meta,
                    r.warmup_iters, r.timed_iters, r.tol, r.sweep_sizes,
                    r.custom_only,
                    (SELECT COUNT(*) FROM measurements m WHERE m.run_id = r.id)
@@ -315,7 +324,7 @@ def fetch_measurements(
     query = f"""
         SELECT {_MEASUREMENT_COLUMNS},
                r.ingested_at, r.git_sha, r.label, r.arch, r.dtype,
-               r.tol, r.warmup_iters, r.timed_iters, r.custom_only,
+               r.hardware_name, r.tol, r.warmup_iters, r.timed_iters, r.custom_only,
                CASE
                    WHEN m.kernel_name = 'cublas' THEN NULL
                    ELSE (
@@ -385,7 +394,7 @@ def measurements_with_perf_pct(
             f"""
             SELECT {_MEASUREMENT_COLUMNS},
                    r.ingested_at, r.git_sha, r.label, r.arch, r.dtype,
-                   r.tol, r.warmup_iters, r.timed_iters, r.custom_only,
+                   r.hardware_name, r.tol, r.warmup_iters, r.timed_iters, r.custom_only,
                    CASE
                        WHEN m.kernel_name = 'cublas' THEN NULL
                        ELSE (

@@ -704,6 +704,7 @@ def _runs_table() -> list[dict]:
             "ingested_at": r["ingested_at"],
             "git_sha": r["git_sha"] or "",
             "label": r["label"] or "",
+            "hardware_name": r["hardware_name"] or "",
             "arch": r["arch"],
             "dtype": r["dtype"],
             "kernel_count": r["kernel_count"],
@@ -736,6 +737,7 @@ def build_app() -> dash.Dash:
         conn.close()
     run_options = [
         {"label": f"#{r['id']} {r['arch']}/{r['dtype']}"
+                  + (f" — {r['hardware_name']}" if r["hardware_name"] else "")
                   + (f" [{r['label']}]" if r["label"] else ""),
          "value": r["id"]}
         for r in runs
@@ -874,7 +876,7 @@ def build_app() -> dash.Dash:
                 columns=[
                     {"name": c, "id": c}
                     for c in ["id", "ingested_at", "git_sha", "label",
-                              "arch", "dtype", "kernel_count",
+                              "hardware_name", "arch", "dtype", "kernel_count",
                               "median % vs cuBLAS @ N=4096"]
                 ],
                 data=rows,

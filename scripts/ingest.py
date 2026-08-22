@@ -99,6 +99,7 @@ def ingest(
     force: bool,
     custom_only: bool = False,
     kernel_names: Optional[set[str]] = None,
+    hardware_name: Optional[str] = None,
 ) -> int:
     meta_path = csv_path.with_suffix(".meta")
     if not csv_path.exists():
@@ -191,6 +192,7 @@ def ingest(
         label=label,
         arch=arch,
         dtype=dtype,
+        hardware_name=hardware_name,
         source_csv=source_csv,
         source_meta=source_meta,
         warmup_iters=warmup,
@@ -255,6 +257,11 @@ def main() -> int:
     ap.add_argument("csv", type=Path, help="path to bench_*.csv")
     ap.add_argument("--label", default=None, help="optional run label")
     ap.add_argument(
+        "--hardware-name",
+        default=None,
+        help="optional hardware name for this benchmark run",
+    )
+    ap.add_argument(
         "--force",
         action="store_true",
         help="re-ingest even if (csv, meta, sha) already present",
@@ -273,7 +280,14 @@ def main() -> int:
     )
     args = ap.parse_args()
     kernel_names = set(args.kernel_names) if args.kernel_names else None
-    return ingest(args.csv, args.label, args.force, args.custom_only, kernel_names)
+    return ingest(
+        args.csv,
+        args.label,
+        args.force,
+        args.custom_only,
+        kernel_names,
+        args.hardware_name,
+    )
 
 
 if __name__ == "__main__":
