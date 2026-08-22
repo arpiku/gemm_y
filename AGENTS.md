@@ -65,9 +65,8 @@ src/sm90/                    Hopper kernels
 src/sm120/                   Blackwell kernels
 tests/test.cu                build and correctness smoke tests
 tests/kernel_smoke.cu        focused smoke test for new kernels
-scripts/                     benchmark, ingestion, dashboard, and remote-test tools
+scripts/                     benchmark, ingestion, and dashboard tools
 scripts/ingest.py            CSV/.meta ingestion, including custom-only runs
-scripts/remote_smoke.py      SSH harness for an already-running remote GPU pod
 scripts/db.py                SQLite schema and dashboard query layer
 ```
 
@@ -144,23 +143,16 @@ When validating code, the model must run the produced executable where practical
 
 ### Remote GPU validation
 
-- `scripts/remote_smoke.py` connects only to an already-running pod over SSH;
-  it does not create or terminate RunPod instances.
-- The user launches and stops the pod manually. Never put RunPod API keys or
-  SSH private-key contents in the repository, logs, manifests, or commands.
-- An encrypted SSH key may be unlocked through the user's local SSH agent; the
-  harness must remain non-interactive for individual SSH/SCP operations.
-- Remote smoke runs use `/workspace/gemm_y_remote/<run-id>/` and must collect
-  toolchain, GPU, build, smoke, and manifest artifacts locally.
-- Remote source packages must use an explicit task-specific allowlist. For the
-  smoke build, include only `CMakeLists.txt`, `src/`, and `tests/`; do not upload
-  `pyenv/`, `CMakeFiles/`, `.git/`, `build/`, `results/`, `db/`, `refs/`, or
-  local artifact directories.
-- Report the package file count and size before any paid pod upload and abort
-  locally when it exceeds the configured safety limit.
-- RTX 50-series `sm_120` pods validate the harness and existing kernels only;
-  they must not be used to claim `tcgen05.mma` support. Use confirmed `sm_100`
-  hardware for the limited tcgen05 experiment.
+Remote validation is currently manual and container-based. First reproduce the
+remote RunPod environment locally with Docker, then use the same image for
+remote execution over SSH. The initial workflow is intentionally explicit:
+create a minimal source/archive payload, copy it with `scp`, connect with
+`ssh`, run the container and validation commands, and copy logs/results back.
+
+Do not add RunPod lifecycle automation, credentials, SSH private keys, automatic
+SQLite ingestion, or a Python orchestration harness. Validate `kernel_smoke`
+before running benchmarks, and keep benchmark interpretation and database
+ingestion as manual local operations.
 
 ## Experiment workflow
 

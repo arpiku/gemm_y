@@ -30,7 +30,7 @@
 20. Visualization methodology: dashboard views
 21. Custom-only ingestion and focused kernel smoke tests
 22. Active kernels, one-off tuning, and source-level dispatch
-23. Remote GPU validation and architecture-specific execution
+23. Remote GPU validation and architecture-specific execution (superseded)
 
 ---
 
@@ -1464,59 +1464,33 @@ profile or below the improvement threshold.
 
 ## 23. Remote GPU validation and architecture-specific execution
 
-### Decision
+> **Superseded.** The Python SSH smoke harness and temporary `refs/` reference
+> directory described by this decision were removed. This section is retained
+> as historical context; active remote-development instructions are in
+> `TODO.md` and `AGENTS.md`.
 
-Remote GPU validation is an SSH transport and artifact-collection workflow, not
-part of the production GEMM runtime. The first implementation connects to a
-manually launched pod and leaves pod lifecycle management to the user. It does
-not require RunPod API credentials and must not automatically stop or terminate
-a pod.
+### Historical decision
 
-The remote workspace is isolated per run:
+The original plan treated remote GPU validation as an SSH transport and
+artifact-collection workflow rather than part of the production GEMM runtime.
+It connected to a manually launched pod, left pod lifecycle management to the
+user, and avoided RunPod API credentials. It also proposed isolated remote
+workspaces, task-specific source archives, remote smoke execution, and local
+artifact retrieval.
 
-```text
-/workspace/gemm_y_remote/<run-id>/
-```
+The plan further distinguished RTX 50-series `sm_120` validation from
+`tcgen05.mma` validation, reserving the latter for confirmed compatible
+hardware and planning Hopper (`sm_90`) as the primary optimization phase.
 
-Remote source packages must be task-specific allowlists rather than broad
-working-tree archives. The smoke package contains only:
+### Why superseded
 
-```text
-CMakeLists.txt
-src/
-tests/
-```
+The Python harness added orchestration, packaging, retry, manifest, and
+artifact-management complexity before the remote environment had been
+reproduced locally. The replacement strategy first matches the remote image
+with a local Docker development environment, then uses an explicit manual
+SSH/SCP workflow. A small shell helper may be added only after that manual
+workflow is validated.
 
-Generated CMake state, Python environments, repository history, benchmark
-results, databases, references, and local artifacts are not remote build
-inputs. A local package-size limit and file-count report are required before a
-paid pod upload.
-
-The RTX 50-series `sm_120` target is not a `tcgen05.mma` target. RTX 5090 runs
-are limited to validating the harness, CUDA toolchain visibility, existing
-kernels, and artifact retrieval. A future tcgen05 experiment requires confirmed
-`sm_100` hardware and is intentionally limited to one base kernel. The primary
-optimization phase after that experiment is Hopper (`sm_90`).
-
-### Rationale
-
-The initial working-tree archive included a local Python environment and root
-CMake build state, making the upload unnecessarily large and increasing paid
-pod time before any test could run. An explicit source allowlist prevents local
-environment contamination and makes the remote build reproducible.
-
-Manual pod lifecycle control avoids embedding credentials and avoids accidental
-billing from automatic provisioning. Separating architecture validation from
-kernel development prevents unsupported `tcgen05` instructions from being
-mistakenly tested on `sm_120` hardware.
-
-### Consequences
-
-- Remote smoke and benchmark runs produce local logs, CSV/metadata files, and a
-  manifest; they do not modify `db/gemm_y.db` automatically.
-- SSH authentication remains local. Passphrases are never stored by the
-  harness; an SSH agent may unlock the key once for multiple SSH/SCP operations.
-- Source packaging, remote execution, and artifact retrieval can be tested in
-  progressively smaller and cheaper stages.
-- The harness can later serve Hopper and confirmed `sm_100` systems without
-  becoming a runtime dependency or autotuning framework.
+The temporary `refs/` directory was also removed. Any future `tcgen05` work
+requires a new architecture decision with defined hardware, instruction,
+layout, build, and correctness contracts.
