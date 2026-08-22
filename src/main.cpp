@@ -23,6 +23,10 @@
 #if defined(CUDA_ARCH_SM_90)
 #include "sm90/gemm_bf16.cuh"
 #include "sm90/gemm_naive.cuh"
+#elif defined(CUDA_ARCH_SM_100)
+#include "sm100/gemm_bf16.cuh"
+#include "sm100/gemm_naive.cuh"
+#include "sm100/k1_dispatch.cuh"
 #elif defined(CUDA_ARCH_SM_120)
 #include "sm120/gemm_bf16.cuh"
 #include "sm120/gemm_naive.cuh"
@@ -34,6 +38,7 @@ namespace {
 // 14-size square sweep (powers of 2 + midpoints).
 const std::vector<int> kSweepSizes = {32,  64,  96,   128,  192,  256,  384,
                                       512, 768, 1024, 1536, 2048, 3072, 4096};
+const std::vector<int> kSm100SweepSizes = {256, 512, 1024, 2048, 4096};
 
 // Write a SweepResult to a CSV file. Schema is defined here (one place).
 void write_csv(const gemm_y::SweepResult &result, const std::string &path) {
@@ -88,6 +93,7 @@ void register_bf16_kernel(
 void write_meta(
     const std::string &meta_path, const std::string &arch,
     const std::string &dtype, int warmup_iters, int timed_iters, double tol,
+    const std::vector<int> &sweep_sizes,
     const std::vector<std::pair<std::string, std::string>> &custom_kernels) {
   std::FILE *f = std::fopen(meta_path.c_str(), "w");
   if (f == nullptr) {
@@ -100,8 +106,8 @@ void write_meta(
   std::fprintf(f, "timed_iters=%d\n", timed_iters);
   std::fprintf(f, "tol=%.6g\n", tol);
   std::fprintf(f, "sweep_sizes=");
-  for (std::size_t i = 0; i < kSweepSizes.size(); ++i) {
-    std::fprintf(f, "%s%d", (i == 0 ? "" : ","), kSweepSizes[i]);
+  for (std::size_t i = 0; i < sweep_sizes.size(); ++i) {
+    std::fprintf(f, "%s%d", (i == 0 ? "" : ","), sweep_sizes[i]);
   }
   std::fprintf(f, "\n");
   // cuBLAS is always the first kernel row (the implicit reference).
@@ -120,20 +126,29 @@ void profile_bf16_kernels(const std::string &arch) {
   gemm_y::Profiler<T> prof;
   std::vector<std::pair<std::string, std::string>> kernels;
 
-  register_bf16_kernel<gemm_y::NaiveGemm<T>>(prof, kernels);
-#if defined(CUDA_ARCH_SM_120)
-  register_bf16_kernel<gemm_y::k1_smem>(prof, kernels);
+#if defined(CUDA_ARCH_SM_100)
   register_bf16_kernel<gemm_y::k1_dispatch>(prof, kernels);
+  register_bf16_kernel<gemm_y::k_tcgen05x>(prof, kernels);
+#elif defined(CUDA_ARCH_SM_120)
+  register_bf16_kernel<gemm_y::k1_dispatch>(prof, kernels);
+#else
+  register_bf16_kernel<gemm_y::NaiveGemm<T>>(prof, kernels);
 #endif
 
-  const gemm_y::SweepResult result = prof.run_sweep(kSweepSizes);
+#if defined(CUDA_ARCH_SM_100)
+  const auto &sweep_sizes = kSm100SweepSizes;
+#else
+  const auto &sweep_sizes = kSweepSizes;
+#endif
+  const gemm_y::SweepResult result = prof.run_sweep(sweep_sizes);
 
   const std::string out_csv = "results/bench_" + arch + "_bf16.csv";
   const std::string out_meta = "results/bench_" + arch + "_bf16.meta";
   std::printf("gemm_y: arch=%s dtype=bf16  out=%s\n", arch.c_str(),
               out_csv.c_str());
   write_csv(result, out_csv);
-  write_meta(out_meta, arch, "bf16", 20, 50, gemm_y::kRelErrTol<T>(), kernels);
+  write_meta(out_meta, arch, "bf16", 20, 50, gemm_y::kRelErrTol<T>(),
+             sweep_sizes, kernels);
   std::printf("gemm_y: done. %zu rows written to %s\n", result.rows.size(),
               out_csv.c_str());
 }
@@ -155,7 +170,8 @@ void profile_fp16_kernels(const std::string &arch) {
 
   kernels.emplace_back(std::string(gemm_y::NaiveGemm<T>::name()),
                        std::string(gemm_y::NaiveGemm<T>::description()));
-  write_meta(out_meta, arch, "fp16", 20, 50, gemm_y::kRelErrTol<T>(), kernels);
+  write_meta(out_meta, arch, "fp16", 20, 50, gemm_y::kRelErrTol<T>(),
+             kSweepSizes, kernels);
 
   std::printf("gemm_y: done. %zu rows written to %s\n", result.rows.size(),
               out_csv.c_str());
@@ -176,7 +192,8 @@ void profile_tf32_kernels(const std::string &arch) {
   std::vector<std::pair<std::string, std::string>> kernels;
   kernels.emplace_back(std::string(gemm_y::NaiveGemm<T>::name()),
                        std::string(gemm_y::NaiveGemm<T>::description()));
-  write_meta(out_meta, arch, "tf32", 20, 50, gemm_y::kRelErrTol<T>(), kernels);
+  write_meta(out_meta, arch, "tf32", 20, 50, gemm_y::kRelErrTol<T>(),
+             kSweepSizes, kernels);
   std::printf("gemm_y: done. %zu rows written to %s\n", result.rows.size(),
               out_csv.c_str());
 }

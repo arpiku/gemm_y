@@ -2,14 +2,14 @@
 set -Eeuo pipefail
 
 # Edit these connection values before using the remote commands.
-REMOTE_HOST="74.2.96.30"
-REMOTE_PORT="10381"
+REMOTE_HOST="198.13.252.73"
+REMOTE_PORT="54899"
 REMOTE_USER="root"
 SSH_KEY="${HOME}/.ssh/id_ed25519"
 
 REMOTE_ROOT="/workspace/gemm_y"
 REMOTE_ARCHIVE="/workspace/gemm_y-source.tar.gz"
-REMOTE_ARCH="sm_120"
+REMOTE_ARCH="sm_100"
 LOCAL_ARCHIVE="artifacts/rtest/source.tar.gz"
 LOCAL_FETCH_DIR="artifacts/rtest/remote"
 
@@ -243,7 +243,7 @@ finish() {
 }
 trap finish EXIT
 
-tar -xzf "$archive" -C "$root"
+tar --no-same-owner -xzf "$archive" -C "$root"
 capture_gpu gpu-before
 
 run_logged() {
@@ -271,6 +271,7 @@ fi
 
 case "$arch" in
     sm_90) cmake_arch="90" ;;
+    sm_100) cmake_arch="100a" ;;
     sm_120) cmake_arch="120" ;;
     *)
         printf 'unsupported architecture: %s\n' "$arch" >&2

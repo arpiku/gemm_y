@@ -1,0 +1,116 @@
+// gemm_bf16.cuh — shared declaration header for all bf16-specific custom
+// kernels on sm_100 (Blackwell).
+//
+// Each declaration here provides name(), description(), and
+// operator()(GemmArgs<__nv_bfloat16>, cudaStream_t) const. Kernel families may
+// be ordinary structs or class templates when compile-time configuration is
+// needed. Each kernel's operator() definition lives in its own
+// gemm_bf16_k<n>.cu file
+// (compile isolation — a one-line edit to k5 should not recompile k0–k4).
+// CMake's file(GLOB _gemm_y_arch_sources CONFIGURE_DEPENDS "${arch_dir}/*.cu")
+// auto-picks new .cu files; zero CMake changes per kernel.
+//
+// NaiveGemm<T> (the dtype-agnostic sanity baseline) lives in
+// gemm_naive.{cuh,cu}, not here. See ARD §16.
+
+#pragma once
+
+#include <string_view>
+
+#include "bench/GemmArgs.h"
+#include "bench/KernelTraits.h"
+#include "cuda_compat.h"
+
+namespace gemm_y {
+
+struct k_tcgen05x {
+  static constexpr std::string_view name() { return "k_tcgen05x"; }
+  static constexpr std::string_view description() {
+    return "sm100 BF16 tcgen05; TMA; tcgen05.mma; 128x256x128 tile; "
+           "2-stage; CTA_GROUP=1";
+  }
+  void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
+};
+
+// k0_ldg — scalar baseline with explicit read-only-cache loads.
+struct k0_ldg {
+  static constexpr std::string_view name() { return "k0_ldg"; }
+  static constexpr std::string_view description() {
+    return "bf16 scalar GEMM; one thread/element; fp32 accum; __ldg A/B loads";
+  }
+  void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
+};
+
+// k0_coalesced — scalar baseline with an A-favorable 32x8 thread mapping.
+struct k0_coalesced {
+  static constexpr std::string_view name() { return "k0_coalesced"; }
+  static constexpr std::string_view description() {
+    return "bf16 scalar GEMM; one thread/element; fp32 accum; 32x8 A-coalesced "
+           "mapping";
+  }
+  void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
+};
+
+// k1_smem — single-buffered cooperative shared-memory tile.
+struct k1_smem {
+  static constexpr std::string_view name() { return "k1_smem"; }
+  static constexpr std::string_view description() {
+    return "bf16 shared-memory GEMM; 64x64x16 tile; 16x16 block; 4x4/thread; "
+           "single-buffered";
+  }
+  void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
+};
+
+// k1_t_x — isolated code-generation variant of k1_t<64, 64, 16>.
+struct k1_t_x {
+  static constexpr std::string_view name() { return "k1_t_x"; }
+  static constexpr std::string_view description() {
+    return "bf16 dynamic-smem GEMM; 64x64x16 tile; 16x16 block; "
+           "4x4/thread; single-buffered; unrolled FMA; shift-mask indexing";
+  }
+  void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
+};
+
+template <int TileM, int TileN, int TileK> struct k1_t {
+  static_assert(TileM > 0 && TileN > 0 && TileK > 0,
+                "k1_t tile dimensions must be positive");
+  static_assert(TileM % 16 == 0 && TileN % 16 == 0,
+                "k1_t M/N tiles must be divisible by the fixed 16x16 block");
+
+  static constexpr std::string_view name() {
+    if constexpr (TileM == 64 && TileN == 64 && TileK == 16) {
+      return "k1_t";
+    } else if constexpr (TileM == 64 && TileN == 64 && TileK == 8) {
+      return "k1_t_64x64x8";
+    } else if constexpr (TileM == 32 && TileN == 64 && TileK == 16) {
+      return "k1_t_32x64x16";
+    } else if constexpr (TileM == 64 && TileN == 32 && TileK == 16) {
+      return "k1_t_64x32x16";
+    } else {
+      return "k1_t_custom";
+    }
+  }
+
+  static constexpr std::string_view description() {
+    if constexpr (TileM == 64 && TileN == 64 && TileK == 16) {
+      return "bf16 dynamic-smem GEMM; 64x64x16 tile; 16x16 block; "
+             "4x4/thread; single-buffered";
+    } else if constexpr (TileM == 64 && TileN == 64 && TileK == 8) {
+      return "bf16 dynamic-smem GEMM; 64x64x8 tile; 16x16 block; "
+             "4x4/thread; single-buffered";
+    } else if constexpr (TileM == 32 && TileN == 64 && TileK == 16) {
+      return "bf16 dynamic-smem GEMM; 32x64x16 tile; 16x16 block; "
+             "2x4/thread; single-buffered";
+    } else if constexpr (TileM == 64 && TileN == 32 && TileK == 16) {
+      return "bf16 dynamic-smem GEMM; 64x32x16 tile; 16x16 block; "
+             "4x2/thread; single-buffered";
+    } else {
+      return "bf16 dynamic-smem GEMM; custom compile-time tile; 16x16 block; "
+             "single-buffered";
+    }
+  }
+
+  void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
+};
+
+} // namespace gemm_y

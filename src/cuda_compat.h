@@ -12,17 +12,18 @@
 #pragma once
 
 #if defined(__GNUC__)
-#  pragma GCC diagnostic push
-#  pragma GCC diagnostic ignored "-Wold-style-cast"
-#  pragma GCC diagnostic ignored "-Wconversion"
-#  pragma GCC diagnostic ignored "-Wpedantic"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wold-style-cast"
+#pragma GCC diagnostic ignored "-Wconversion"
+#pragma GCC diagnostic ignored "-Wpedantic"
 #endif
 
-#include <cuda_runtime.h>
+#include <cublas_v2.h>
+#include <cuda.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
-#include <cublas_v2.h>
+#include <cuda_runtime.h>
 
 #if defined(__GNUC__)
-#  pragma GCC diagnostic pop
+#pragma GCC diagnostic pop
 #endif

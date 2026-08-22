@@ -21,8 +21,8 @@ endif()
 # ---------------------------------------------------------------------------
 # CUDA toolkit baseline
 # ---------------------------------------------------------------------------
-# CUDA 12.8 is the first release supporting both sm_90 (Hopper) and
-# sm_120 (Blackwell). Fail loudly if the local toolkit is older.
+# CUDA 12.8 is the first release supporting the project architectures. Fail
+# loudly if the local toolkit is older.
 if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.8)
     message(FATAL_ERROR
         "CUDA toolkit >= 12.8 required (found ${CMAKE_CUDA_COMPILER_VERSION}).")
@@ -35,17 +35,21 @@ endif()
 #   cmake -B build                                    # -> Blackwell sm_120
 #   cmake -B build -DGEMM_Y_CUDA_ARCH=sm_90           # -> Hopper    sm_90
 set(GEMM_Y_CUDA_ARCH "sm_120" CACHE STRING "Target CUDA architecture")
-set_property(CACHE GEMM_Y_CUDA_ARCH PROPERTY STRINGS sm_90 sm_120)
+set_property(CACHE GEMM_Y_CUDA_ARCH PROPERTY STRINGS sm_90 sm_100 sm_120)
 
 if(GEMM_Y_CUDA_ARCH STREQUAL "sm_90")
     set(_gemm_y_cuda_arch_num 90)
     set(_gemm_y_cuda_arch_define CUDA_ARCH_SM_90)
+elseif(GEMM_Y_CUDA_ARCH STREQUAL "sm_100")
+    # tcgen05 requires the feature-complete 100a code-generation target.
+    set(_gemm_y_cuda_arch_num 100a)
+    set(_gemm_y_cuda_arch_define CUDA_ARCH_SM_100)
 elseif(GEMM_Y_CUDA_ARCH STREQUAL "sm_120")
     set(_gemm_y_cuda_arch_num 120)
     set(_gemm_y_cuda_arch_define CUDA_ARCH_SM_120)
 else()
     message(FATAL_ERROR
-        "GEMM_Y_CUDA_ARCH must be 'sm_90' or 'sm_120' (got '${GEMM_Y_CUDA_ARCH}')")
+        "GEMM_Y_CUDA_ARCH must be 'sm_90', 'sm_100', or 'sm_120' (got '${GEMM_Y_CUDA_ARCH}')")
 endif()
 
 set(CMAKE_CUDA_ARCHITECTURES ${_gemm_y_cuda_arch_num})
@@ -176,7 +180,7 @@ add_executable(gemm_y
     ${_gemm_y_bench_sources}
 )
 target_include_directories(gemm_y PRIVATE src)
-target_link_libraries(gemm_y PRIVATE CUDA::cublas)
+target_link_libraries(gemm_y PRIVATE CUDA::cublas CUDA::cuda_driver)
 gemm_y_apply_common_flags(gemm_y)
 
 # ---------------------------------------------------------------------------
@@ -190,7 +194,7 @@ add_executable(test_cuda
     ${_gemm_y_bench_sources}
 )
 target_include_directories(test_cuda PRIVATE src)
-target_link_libraries(test_cuda PRIVATE CUDA::cublas)
+target_link_libraries(test_cuda PRIVATE CUDA::cublas CUDA::cuda_driver)
 gemm_y_apply_common_flags(test_cuda)
 
 # Register test_cuda with CTest. The binary's main() returns EXIT_FAILURE
@@ -200,16 +204,17 @@ add_test(NAME test_cuda COMMAND test_cuda)
 # ---------------------------------------------------------------------------
 # Focused kernel smoke target
 # ---------------------------------------------------------------------------
-# The current low-level experiments are sm120-specific. Keep this target
-# separate from test_cuda so it can be run before the broader test suite.
-if(GEMM_Y_CUDA_ARCH STREQUAL "sm_120")
+# Keep this target separate from test_cuda so it can be run before the broader
+# test suite. sm100 uses aligned tcgen05 smoke sizes; sm120 retains its existing
+# boundary-focused smoke coverage.
+if(GEMM_Y_CUDA_ARCH STREQUAL "sm_100" OR GEMM_Y_CUDA_ARCH STREQUAL "sm_120")
     add_executable(kernel_smoke
         tests/kernel_smoke.cu
         ${_gemm_y_arch_sources}
         ${_gemm_y_bench_sources}
     )
     target_include_directories(kernel_smoke PRIVATE src)
-    target_link_libraries(kernel_smoke PRIVATE CUDA::cublas)
+    target_link_libraries(kernel_smoke PRIVATE CUDA::cublas CUDA::cuda_driver)
     gemm_y_apply_common_flags(kernel_smoke)
     add_test(NAME kernel_smoke COMMAND kernel_smoke)
 

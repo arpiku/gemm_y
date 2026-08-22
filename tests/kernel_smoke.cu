@@ -14,7 +14,10 @@
 #include "dtypes.h"
 
 #if defined(CUDA_ARCH_SM_90)
-#error "kernel_smoke currently targets sm_120 bf16 experiments only"
+#error "kernel_smoke currently targets sm_100 and sm_120 bf16 experiments only"
+#elif defined(CUDA_ARCH_SM_100)
+#include "sm100/gemm_bf16.cuh"
+#include "sm100/k1_dispatch.cuh"
 #elif defined(CUDA_ARCH_SM_120)
 #include "sm120/gemm_bf16.cuh"
 #include "sm120/k1_dispatch.cuh"
@@ -82,22 +85,47 @@ template <typename Kernel> bool check_padded_kernel(const char *label) {
 
 int main() {
   using T = gemm_y::dtypes::bf16;
+#if defined(CUDA_ARCH_SM_100)
+  const std::vector<int> sizes = {256, 512};
+  gemm_y::Profiler<T> profiler;
+  profiler.register_kernel<gemm_y::k1_dispatch>();
+  profiler.register_kernel<gemm_y::k_tcgen05x>();
+  const gemm_y::SweepResult result = profiler.run_sweep(sizes);
+  constexpr std::size_t kExpectedRowsPerN = 3;
+  for (const int size : sizes) {
+    int count = 0;
+    bool has_cublas = false;
+    bool has_dispatch = false;
+    bool has_tcgen = false;
+    for (const auto &row : result.rows) {
+      if (row.N != size)
+        continue;
+      ++count;
+      has_cublas |= row.kernel_name == "cublas";
+      has_dispatch |= row.kernel_name == "k1_dispatch";
+      has_tcgen |= row.kernel_name == "k_tcgen05x";
+    }
+    if (count != static_cast<int>(kExpectedRowsPerN) || !has_cublas ||
+        !has_dispatch || !has_tcgen) {
+      std::fprintf(stderr, "sm100 kernel smoke failed at N=%d\n", size);
+      return EXIT_FAILURE;
+    }
+  }
+  std::printf("sm100 kernel smoke passed: %zu rows across %zu sizes\n",
+              result.rows.size(), sizes.size());
+  return EXIT_SUCCESS;
+#else
   const std::vector<int> sizes = {32, 96, 128};
   gemm_y::Profiler<T> profiler;
   profiler.register_kernel<gemm_y::k0_ldg>();
   profiler.register_kernel<gemm_y::k0_coalesced>();
   profiler.register_kernel<gemm_y::k1_smem>();
   profiler.register_kernel<gemm_y::k1_dispatch>();
-
   const gemm_y::SweepResult result = profiler.run_sweep(sizes);
   constexpr std::size_t kExpectedRowsPerN = 5;
   const std::size_t expected_rows = sizes.size() * kExpectedRowsPerN;
-  if (result.rows.size() != expected_rows) {
-    std::fprintf(stderr, "kernel smoke failed: expected %zu rows, got %zu\n",
-                 expected_rows, result.rows.size());
+  if (result.rows.size() != expected_rows)
     return EXIT_FAILURE;
-  }
-
   for (const int size : sizes) {
     bool has_cublas = false;
     bool has_ldg = false;
@@ -107,40 +135,22 @@ int main() {
     for (const auto &row : result.rows) {
       if (row.N != size)
         continue;
-      if (row.kernel_name == "cublas")
-        has_cublas = true;
-      if (row.kernel_name == "k0_ldg")
-        has_ldg = true;
-      if (row.kernel_name == "k0_coalesced")
-        has_coalesced = true;
-      if (row.kernel_name == "k1_smem")
-        has_smem = true;
-      if (row.kernel_name == "k1_dispatch")
-        has_dispatch = true;
+      has_cublas |= row.kernel_name == "cublas";
+      has_ldg |= row.kernel_name == "k0_ldg";
+      has_coalesced |= row.kernel_name == "k0_coalesced";
+      has_smem |= row.kernel_name == "k1_smem";
+      has_dispatch |= row.kernel_name == "k1_dispatch";
     }
-    if (!has_cublas || !has_ldg || !has_coalesced || !has_smem ||
-        !has_dispatch) {
-      std::fprintf(stderr,
-                   "kernel smoke failed at N=%d: cublas=%d k0_ldg=%d "
-                   "k0_coalesced=%d k1_smem=%d k1_dispatch=%d\n",
-                   size, has_cublas, has_ldg, has_coalesced, has_smem,
-                   has_dispatch);
+    if (!has_cublas || !has_ldg || !has_coalesced || !has_smem || !has_dispatch)
       return EXIT_FAILURE;
-    }
   }
-
   if (!check_padded_kernel<gemm_y::k1_smem>("k1_smem") ||
-      !check_padded_kernel<gemm_y::k1_dispatch>("k1_dispatch")) {
-    std::fprintf(stderr, "kernel smoke failed: padded kernel mismatch\n");
+      !check_padded_kernel<gemm_y::k1_dispatch>("k1_dispatch"))
     return EXIT_FAILURE;
-  }
-
-  if (gemm_y::k1_dispatch::selected_kernel_name(999) != "k1_smem") {
-    std::fprintf(stderr, "kernel smoke failed: dispatcher fallback mismatch\n");
+  if (gemm_y::k1_dispatch::selected_kernel_name(999) != "k1_smem")
     return EXIT_FAILURE;
-  }
-
   std::printf("kernel smoke passed: %zu rows across %zu sizes\n",
               result.rows.size(), sizes.size());
   return EXIT_SUCCESS;
+#endif
 }
