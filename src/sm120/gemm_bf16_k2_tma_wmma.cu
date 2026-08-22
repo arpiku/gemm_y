@@ -1,14 +1,16 @@
-// gemm_bf16_k2_tma.cu — first sm120 BF16 TMA staging candidate.
+// gemm_bf16_k2_tma_wmma.cu — sm120 BF16 TMA + WMMA candidate.
 //
-// TMA moves one 64x16 A tile and one 16x64 B tile into shared memory. The
-// compute phase intentionally remains scalar FP32 accumulation: this isolates
-// the TMA transfer/barrier behavior from tensor-core instruction tuning.
+// TMA moves one 64x16 A tile and one 16x64 B tile into shared memory. WMMA
+// loads 16x16 warp fragments and performs BF16 MMA with FP32 accumulation.
+// WMMA stores the FP32 fragments to shared memory before BF16 conversion to C.
 
 #include "gemm_bf16.cuh"
 
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+
+#include <mma.h>
 
 #include "CudaCheck.h"
 #include "bench/GemmArgs.h"
@@ -22,6 +24,13 @@ constexpr int kTileN = 64;
 constexpr int kTileK = 16;
 constexpr int kThreadsX = 16;
 constexpr int kThreadsY = 16;
+constexpr int kWarpSize = 32;
+constexpr int kWarpsM = 4;
+constexpr int kWarpsN = 2;
+constexpr int kWmmaM = 16;
+constexpr int kWmmaN = 16;
+constexpr int kWmmaK = 16;
+constexpr int kWarpTileN = kWarpsN * kWmmaN;
 
 constexpr int kBytesPerElement = sizeof(__nv_bfloat16);
 constexpr int kBytesPerStage =
@@ -61,24 +70,40 @@ __device__ inline void tma_load_2d(void *destination, const CUtensorMap *map,
                : "memory");
 }
 
-__global__ void k2_tma_gemm_kernel(const __grid_constant__ CUtensorMap a_map,
-                                   const __grid_constant__ CUtensorMap b_map,
-                                   __nv_bfloat16 *C, int M, int N, int K,
-                                   int ldC) {
+__global__ void
+k2_tma_wmma_gemm_kernel(const __grid_constant__ CUtensorMap a_map,
+                        const __grid_constant__ CUtensorMap b_map,
+                        __nv_bfloat16 *C, int M, int N, int K, int ldC) {
 
   extern __shared__ __align__(128) unsigned char storage[];
   auto *const shared = reinterpret_cast<__nv_bfloat16 *>(storage);
   auto *const As = shared;
   auto *const Bs = As + kTileM * kTileK;
+  auto *const Cs = reinterpret_cast<float *>(Bs + kTileK * kTileN);
   __shared__ uint64_t barrier;
 
   const int tx = static_cast<int>(threadIdx.x);
   const int ty = static_cast<int>(threadIdx.y);
+  const int tid = ty * kThreadsX + tx;
+  const int warp_id = tid / kWarpSize;
+  const int warp_m = warp_id % kWarpsM;
+  const int warp_n = warp_id / kWarpsM;
   const int block_row = static_cast<int>(blockIdx.x) * kTileM;
   const int block_col = static_cast<int>(blockIdx.y) * kTileN;
-  const int row_base = tx * 4;
-  const int col_base = ty * 4;
-  float accum[4][4] = {};
+
+  using AFragment =
+      nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, kWmmaM, kWmmaN, kWmmaK,
+                             __nv_bfloat16, nvcuda::wmma::col_major>;
+  using BFragment =
+      nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, kWmmaM, kWmmaN, kWmmaK,
+                             __nv_bfloat16, nvcuda::wmma::col_major>;
+  using CFragment = nvcuda::wmma::fragment<nvcuda::wmma::accumulator, kWmmaM,
+                                           kWmmaN, kWmmaK, float>;
+  AFragment a_fragment;
+  BFragment b_fragments[2];
+  CFragment c_fragments[2];
+  for (auto &fragment : c_fragments)
+    nvcuda::wmma::fill_fragment(fragment, 0.0f);
 
   if (tx == 0 && ty == 0) {
     mbarrier_init(&barrier);
@@ -101,27 +126,32 @@ __global__ void k2_tma_gemm_kernel(const __grid_constant__ CUtensorMap a_map,
     mbarrier_wait(&barrier, phase);
     phase ^= 1;
 
-    for (int kk = 0; kk < kTileK && k0 + kk < K; ++kk) {
-      float a[4];
-      float b[4];
-      for (int mi = 0; mi < 4; ++mi)
-        a[mi] = static_cast<float>(As[kk * kTileM + row_base + mi]);
-      for (int ni = 0; ni < 4; ++ni)
-        b[ni] = static_cast<float>(Bs[(col_base + ni) * kTileK + kk]);
-      for (int mi = 0; mi < 4; ++mi)
-        for (int ni = 0; ni < 4; ++ni)
-          accum[mi][ni] += a[mi] * b[ni];
+    nvcuda::wmma::load_matrix_sync(a_fragment, As + warp_m * kWmmaM, kTileM);
+    for (int fragment_n = 0; fragment_n < 2; ++fragment_n) {
+      const int col = warp_n * kWarpTileN + fragment_n * kWmmaN;
+      nvcuda::wmma::load_matrix_sync(b_fragments[fragment_n], Bs + col * kTileK,
+                                     kTileK);
+      nvcuda::wmma::mma_sync(c_fragments[fragment_n], a_fragment,
+                             b_fragments[fragment_n], c_fragments[fragment_n]);
     }
     __syncthreads();
   }
 
-  for (int mi = 0; mi < 4; ++mi) {
-    const int row = block_row + row_base + mi;
-    for (int ni = 0; ni < 4; ++ni) {
-      const int col = block_col + col_base + ni;
-      if (row < M && col < N)
-        C[row + col * ldC] = static_cast<__nv_bfloat16>(accum[mi][ni]);
-    }
+  for (int fragment_n = 0; fragment_n < 2; ++fragment_n) {
+    const int row = warp_m * kWmmaM;
+    const int col = warp_n * kWarpTileN + fragment_n * kWmmaN;
+    nvcuda::wmma::store_matrix_sync(Cs + row + col * kTileM,
+                                    c_fragments[fragment_n], kTileM,
+                                    nvcuda::wmma::mem_col_major);
+  }
+  __syncthreads();
+
+  for (int index = tid; index < kTileM * kTileN;
+       index += kThreadsX * kThreadsY) {
+    const int row = index % kTileM;
+    const int col = index / kTileM;
+    C[block_row + row + (block_col + col) * ldC] =
+        static_cast<__nv_bfloat16>(Cs[index]);
   }
 }
 
@@ -146,7 +176,7 @@ void encode_map(CUtensorMap *map, const __nv_bfloat16 *pointer, int rows,
   if (status != CUDA_SUCCESS) {
     const char *message = nullptr;
     (void)cuGetErrorString(status, &message);
-    std::fprintf(stderr, "k2_tma: cuTensorMapEncodeTiled failed: %s\n",
+    std::fprintf(stderr, "k2_tma_wmma: cuTensorMapEncodeTiled failed: %s\n",
                  message == nullptr ? "unknown error" : message);
     std::abort();
   }
@@ -154,7 +184,7 @@ void encode_map(CUtensorMap *map, const __nv_bfloat16 *pointer, int rows,
 
 } // namespace
 
-bool k2_tma::supports(const GemmArgs<__nv_bfloat16> &args) {
+bool k2_tma_wmma::supports(const GemmArgs<__nv_bfloat16> &args) {
   constexpr int kTmaStrideAlignmentBytes = 16;
   const bool tma_stride_aligned =
       (args.A.ld * static_cast<int>(sizeof(__nv_bfloat16))) %
@@ -169,12 +199,12 @@ bool k2_tma::supports(const GemmArgs<__nv_bfloat16> &args) {
          tma_stride_aligned;
 }
 
-void k2_tma::operator()(GemmArgs<__nv_bfloat16> args,
-                        cudaStream_t stream) const {
+void k2_tma_wmma::operator()(GemmArgs<__nv_bfloat16> args,
+                             cudaStream_t stream) const {
   if (!supports(args)) {
     std::fprintf(stderr,
-                 "k2_tma: unsupported shape or stride; profiler should skip "
-                 "this invocation\n");
+                 "k2_tma_wmma: unsupported shape or stride; profiler should "
+                 "skip this invocation\n");
     std::abort();
   }
 
@@ -187,12 +217,13 @@ void k2_tma::operator()(GemmArgs<__nv_bfloat16> args,
 
   constexpr std::size_t shared_bytes =
       static_cast<std::size_t>(kTileM * kTileK + kTileK * kTileN) *
-      sizeof(__nv_bfloat16);
+          sizeof(__nv_bfloat16) +
+      static_cast<std::size_t>(kTileM * kTileN) * sizeof(float);
   const dim3 grid((args.C.rows + kTileM - 1) / kTileM,
                   (args.C.cols + kTileN - 1) / kTileN, 1);
   const dim3 block(kThreadsX, kThreadsY, 1);
 
-  auto kernel = k2_tma_gemm_kernel;
+  auto kernel = k2_tma_wmma_gemm_kernel;
   CUDA_CHECK(cudaFuncSetAttribute(kernel,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize,
                                   static_cast<int>(shared_bytes)));

@@ -173,7 +173,9 @@ int main() {
   }
   if (!check_padded_kernel<gemm_y::k1_smem>("k1_smem") ||
       !check_padded_kernel<gemm_y::k1_dispatch>("k1_dispatch") ||
-      !check_padded_kernel<gemm_y::k2_tma, 64, 64, 64, 72, 72, 73>("k2_tma"))
+      !check_padded_kernel<gemm_y::k2_tma, 64, 64, 64, 72, 72, 73>("k2_tma") ||
+      !check_padded_kernel<gemm_y::k2_tma_wmma, 64, 64, 64, 72, 72, 73>(
+          "k2_tma_wmma"))
     return EXIT_FAILURE;
   if (gemm_y::k1_dispatch::selected_kernel_name(999) != "k1_smem")
     return EXIT_FAILURE;

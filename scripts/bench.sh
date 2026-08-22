@@ -59,7 +59,8 @@ echo "[bench] enabling persistence mode..."
 nvidia-smi -i "${GPU_ID}" -pm 1
 
 # 2. Query max graphics clock.
-MAX_GR=$(nvidia-smi --query-gpu=clocks.max.gr --format=csv,noheader -i "${GPU_ID}" | head -n1 | tr -d ' ')
+MAX_GR=$(nvidia-smi --query-gpu=clocks.max.gr --format=csv,noheader -i "${GPU_ID}" |
+    head -n1 | tr -cd '0-9')
 if [[ -z "${MAX_GR}" ]]; then
     echo "error: could not query max graphics clock" >&2
     exit 1
@@ -83,8 +84,52 @@ if [[ ! -x "${BENCH_BINARY}" ]]; then
     exit 1
 fi
 
+# sudo -u sanitizes the dynamic-loader environment. Add the library directory
+# belonging to the active CUDA installation explicitly. The binary may require
+# a particular cuBLAS soname (for example libcublas.so.12), so validate that
+# exact dependency instead of assuming the active toolkit major version.
+CUDA_LIB_DIR=""
+NVCC_PATH=$(command -v nvcc || true)
+if [[ -n "${NVCC_PATH}" ]]; then
+    NVCC_PATH=$(readlink -f "${NVCC_PATH}")
+    CUDA_ROOT=$(dirname -- "$(dirname -- "${NVCC_PATH}")")
+    if compgen -G "${CUDA_ROOT}/lib64/libcublas.so.*" >/dev/null; then
+        CUDA_LIB_DIR="${CUDA_ROOT}/lib64"
+    fi
+fi
+if [[ -z "${CUDA_LIB_DIR}" ]]; then
+    for candidate in /usr/local/cuda/lib64 /usr/local/cuda-*/lib64 /opt/cuda/lib64; do
+        if compgen -G "${candidate}/libcublas.so.*" >/dev/null; then
+            CUDA_LIB_DIR="${candidate}"
+            break
+        fi
+    done
+fi
+if [[ -z "${CUDA_LIB_DIR}" ]]; then
+    echo "error: could not locate a CUDA cuBLAS library directory" >&2
+    exit 1
+fi
+
+BENCH_LD_LIBRARY_PATH="${CUDA_LIB_DIR}"
+if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+    BENCH_LD_LIBRARY_PATH="${BENCH_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH}"
+fi
+
+# Check the dependency using the same library path that will be passed to
+# sudo -u. This catches stale builds, such as a CUDA 12 binary on a CUDA 13
+# host, before starting the benchmark.
+MISSING_LIBRARY=$(LD_LIBRARY_PATH="${BENCH_LD_LIBRARY_PATH}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+    ldd "${BENCH_BINARY}" | awk '/=> not found/ {print $1; exit}')
+if [[ -n "${MISSING_LIBRARY}" ]]; then
+    echo "error: ${BENCH_BINARY} requires ${MISSING_LIBRARY}, but it is not available" >&2
+    echo "error: rebuild the binary with the active CUDA toolkit (${CUDA_ROOT:-unknown})" >&2
+    exit 1
+fi
+
+echo "[bench] CUDA library directory: ${CUDA_LIB_DIR}"
 echo "[bench] running ${BENCH_BINARY} as '${ORIG_USER}'..."
-sudo -u "${ORIG_USER}" "${BENCH_BINARY}"
+sudo -u "${ORIG_USER}" env "LD_LIBRARY_PATH=${BENCH_LD_LIBRARY_PATH}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+    "${BENCH_BINARY}"
 
 # 6. Post-run temperature (thermal delta sanity check).
 TEMP_AFTER=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader -i "${GPU_ID}" | head -n1 | tr -d ' ')

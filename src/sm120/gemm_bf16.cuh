@@ -63,6 +63,17 @@ struct k2_tma {
   void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
 };
 
+// k2_tma_wmma — TMA-fed shared-memory tile with WMMA BF16 MMA.
+struct k2_tma_wmma {
+  static constexpr std::string_view name() { return "k2_tma_wmma"; }
+  static constexpr std::string_view description() {
+    return "bf16 TMA WMMA GEMM; 64x64x16 tile; 8 warps; 16x16x16 BF16 MMA; "
+           "fp32 accum; aligned full tiles only";
+  }
+  static bool supports(const GemmArgs<__nv_bfloat16> &args);
+  void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
+};
+
 // k1_t_x — isolated code-generation variant of k1_t<64, 64, 16>.
 struct k1_t_x {
   static constexpr std::string_view name() { return "k1_t_x"; }

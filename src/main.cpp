@@ -134,6 +134,9 @@ void profile_bf16_kernels(const std::string &arch) {
   prof.register_kernel_if<gemm_y::k2_tma>(gemm_y::k2_tma::supports);
   kernels.emplace_back(std::string(gemm_y::k2_tma::name()),
                        std::string(gemm_y::k2_tma::description()));
+  prof.register_kernel_if<gemm_y::k2_tma_wmma>(gemm_y::k2_tma_wmma::supports);
+  kernels.emplace_back(std::string(gemm_y::k2_tma_wmma::name()),
+                       std::string(gemm_y::k2_tma_wmma::description()));
 #else
   register_bf16_kernel<gemm_y::NaiveGemm<T>>(prof, kernels);
 #if defined(CUDA_ARCH_SM_90)
