@@ -45,7 +45,7 @@ __device__ inline void mbarrier_init(uint64_t *barrier) {
 
 __device__ inline void mbarrier_wait(uint64_t *barrier, int phase) {
   const unsigned address = __cvta_generic_to_shared(barrier);
-  // Random wait it, after which try wait expires, and retries
+  // Random wait time out, after which try wait expires, and it retries
   constexpr unsigned kWaitHint = 0x989680;
   asm volatile(
       "{\n"
@@ -159,15 +159,17 @@ k3_tma_mma_pipe_gemm_kernel(const __grid_constant__ CUtensorMap a_map,
   const int block_col = static_cast<int>(blockIdx.y) * kTileN;
 
   float accum[kMmaCountN][4] = {};
+
   if (tx == 0 && ty == 0) {
     for (int stage = 0; stage < kPipelineStages; ++stage)
       mbarrier_init(&barriers[stage]);
-    asm volatile("fence.mbarrier_init.release.cluster;" : : : "memory");
+    // asm volatile("fence.mbarrier_init.release.cluster;" : : : "memory");
   }
   __syncthreads();
 
   int stage = 0;
   int phase[kPipelineStages] = {};
+
   if (tx == 0 && ty == 0)
     issue_tma_stage(&a_map, &b_map, As, Bs, block_row, block_col, 0,
                     &barriers[stage]);
