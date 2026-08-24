@@ -45,6 +45,7 @@ __device__ inline void mbarrier_init(uint64_t *barrier) {
 
 __device__ inline void mbarrier_wait(uint64_t *barrier, int phase) {
   const unsigned address = __cvta_generic_to_shared(barrier);
+  // Random wait it, after which try wait expires, and retries
   constexpr unsigned kWaitHint = 0x989680;
   asm volatile(
       "{\n"
