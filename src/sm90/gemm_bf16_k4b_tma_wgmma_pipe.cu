@@ -1,8 +1,8 @@
-// gemm_bf16_k4.cu — Hopper BF16 TMA + WGMMA GEMM.
+// gemm_bf16_k4b_tma_wgmma_pipe.cu — Hopper BF16 TMA + WGMMA GEMM.
 //
-// A CTA computes a 128x128 output tile with a three-stage 128x64 / 64x128
+// A CTA computes a 128x256 output tile with a two-stage 128x64 / 64x256
 // TMA pipeline. One warp-group produces TMA stages while two warp-groups each
-// accumulate one 64-row output band using m64n128k16 WGMMA instructions.
+// accumulate one 64-row output band using m64n256k16 WGMMA instructions.
 
 #include "gemm_bf16.cuh"
 
@@ -19,19 +19,19 @@ namespace gemm_y {
 namespace {
 
 constexpr int kTileM = 128;
-constexpr int kTileN = 128;
+constexpr int kTileN = 256;
 constexpr int kTileK = 64;
-constexpr int kStages = 3;
+constexpr int kStages = 2;
 constexpr int kWarpGroupThreads = 128;
 constexpr int kConsumerWarpGroups = 2;
 constexpr int kThreads = (1 + kConsumerWarpGroups) * kWarpGroupThreads;
 constexpr int kWgmmaM = 64;
-constexpr int kWgmmaN = 128;
+constexpr int kWgmmaN = 256;
 constexpr int kWgmmaK = 16;
 constexpr int kWgmmaKPerTile = kTileK / kWgmmaK;
 // A's minor dimension is split into two 64-row boxes because a 128B
 // swizzle cannot encode a 128-element BF16 minor dimension (256 bytes).
-constexpr int kTmaABoxM = kTileM / 2;
+constexpr int kTmaABoxRows = kTileM / 2;
 constexpr int kTmaBytes =
     (kTileM * kTileK + kTileK * kTileN) * sizeof(__nv_bfloat16);
 constexpr int kTmaStrideAlignmentBytes = 16;
@@ -45,7 +45,7 @@ struct alignas(128) SharedStorage {
 };
 
 static_assert(sizeof(SharedStorage) <= 99 * 1024,
-              "k4 shared-memory footprint exceeds Hopper's 99 KiB limit");
+              "k4b shared-memory footprint exceeds Hopper's 99 KiB limit");
 
 __device__ __forceinline__ uint32_t smem_address(const void *pointer) {
   return static_cast<uint32_t>(__cvta_generic_to_shared(pointer));
@@ -142,17 +142,17 @@ __device__ __forceinline__ void tma_load_2d(void *destination,
 }
 
 // Every WGMMA thread owns eight FP32 registers for each 16-column output
-// fragment of m64n128. The descriptor layout is intentionally fixed with the
-// tile geometry above; this is not a generic WGMMA wrapper.
+// fragment of m64n256. The descriptor layout is fixed for the 128B-swizzled
+// 64-element-minor-dimension TMA tiles used by this kernel.
 template <int ScaleD>
-__device__ __forceinline__ void wgmma_m64n128k16(
+__device__ __forceinline__ void wgmma_m64n256k16(
     float (&d)[kWgmmaN / 16][8], const __nv_bfloat16 *a,
     const __nv_bfloat16 *b) {
   static_assert(ScaleD == 0 || ScaleD == 1, "ScaleD must be 0 or 1");
   const uint64_t descriptor_a = make_wgmma_descriptor(a);
   const uint64_t descriptor_b = make_wgmma_descriptor(b);
   asm volatile(
-      "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 "
+      "wgmma.mma_async.sync.aligned.m64n256k16.f32.bf16.bf16 "
       "{%0, %1, %2, %3, %4, %5, %6, %7, "
       " %8, %9, %10, %11, %12, %13, %14, %15, "
       " %16, %17, %18, %19, %20, %21, %22, %23, "
@@ -160,29 +160,38 @@ __device__ __forceinline__ void wgmma_m64n128k16(
       " %32, %33, %34, %35, %36, %37, %38, %39, "
       " %40, %41, %42, %43, %44, %45, %46, %47, "
       " %48, %49, %50, %51, %52, %53, %54, %55, "
-      " %56, %57, %58, %59, %60, %61, %62, %63}, "
-      "%64, %65, %66, %67, %68, %69, %70;"
-      : "+f"(d[0][0]), "+f"(d[0][1]), "+f"(d[0][2]), "+f"(d[0][3]),
-        "+f"(d[0][4]), "+f"(d[0][5]), "+f"(d[0][6]), "+f"(d[0][7]),
-        "+f"(d[1][0]), "+f"(d[1][1]), "+f"(d[1][2]), "+f"(d[1][3]),
-        "+f"(d[1][4]), "+f"(d[1][5]), "+f"(d[1][6]), "+f"(d[1][7]),
-        "+f"(d[2][0]), "+f"(d[2][1]), "+f"(d[2][2]), "+f"(d[2][3]),
-        "+f"(d[2][4]), "+f"(d[2][5]), "+f"(d[2][6]), "+f"(d[2][7]),
-        "+f"(d[3][0]), "+f"(d[3][1]), "+f"(d[3][2]), "+f"(d[3][3]),
-        "+f"(d[3][4]), "+f"(d[3][5]), "+f"(d[3][6]), "+f"(d[3][7]),
-        "+f"(d[4][0]), "+f"(d[4][1]), "+f"(d[4][2]), "+f"(d[4][3]),
-        "+f"(d[4][4]), "+f"(d[4][5]), "+f"(d[4][6]), "+f"(d[4][7]),
-        "+f"(d[5][0]), "+f"(d[5][1]), "+f"(d[5][2]), "+f"(d[5][3]),
-        "+f"(d[5][4]), "+f"(d[5][5]), "+f"(d[5][6]), "+f"(d[5][7]),
-        "+f"(d[6][0]), "+f"(d[6][1]), "+f"(d[6][2]), "+f"(d[6][3]),
-        "+f"(d[6][4]), "+f"(d[6][5]), "+f"(d[6][6]), "+f"(d[6][7]),
-        "+f"(d[7][0]), "+f"(d[7][1]), "+f"(d[7][2]), "+f"(d[7][3]),
-        "+f"(d[7][4]), "+f"(d[7][5]), "+f"(d[7][6]), "+f"(d[7][7])
+      " %56, %57, %58, %59, %60, %61, %62, %63, "
+      " %64, %65, %66, %67, %68, %69, %70, %71, "
+      " %72, %73, %74, %75, %76, %77, %78, %79, "
+      " %80, %81, %82, %83, %84, %85, %86, %87, "
+      " %88, %89, %90, %91, %92, %93, %94, %95, "
+      " %96, %97, %98, %99, %100, %101, %102, %103, "
+      " %104, %105, %106, %107, %108, %109, %110, %111, "
+      " %112, %113, %114, %115, %116, %117, %118, %119, "
+      " %120, %121, %122, %123, %124, %125, %126, %127}, "
+      "%128, %129, %130, %131, %132, %133, %134;"
+      :
+        "+f"(d[0][0]), "+f"(d[0][1]), "+f"(d[0][2]), "+f"(d[0][3]), "+f"(d[0][4]), "+f"(d[0][5]), "+f"(d[0][6]), "+f"(d[0][7]),
+        "+f"(d[1][0]), "+f"(d[1][1]), "+f"(d[1][2]), "+f"(d[1][3]), "+f"(d[1][4]), "+f"(d[1][5]), "+f"(d[1][6]), "+f"(d[1][7]),
+        "+f"(d[2][0]), "+f"(d[2][1]), "+f"(d[2][2]), "+f"(d[2][3]), "+f"(d[2][4]), "+f"(d[2][5]), "+f"(d[2][6]), "+f"(d[2][7]),
+        "+f"(d[3][0]), "+f"(d[3][1]), "+f"(d[3][2]), "+f"(d[3][3]), "+f"(d[3][4]), "+f"(d[3][5]), "+f"(d[3][6]), "+f"(d[3][7]),
+        "+f"(d[4][0]), "+f"(d[4][1]), "+f"(d[4][2]), "+f"(d[4][3]), "+f"(d[4][4]), "+f"(d[4][5]), "+f"(d[4][6]), "+f"(d[4][7]),
+        "+f"(d[5][0]), "+f"(d[5][1]), "+f"(d[5][2]), "+f"(d[5][3]), "+f"(d[5][4]), "+f"(d[5][5]), "+f"(d[5][6]), "+f"(d[5][7]),
+        "+f"(d[6][0]), "+f"(d[6][1]), "+f"(d[6][2]), "+f"(d[6][3]), "+f"(d[6][4]), "+f"(d[6][5]), "+f"(d[6][6]), "+f"(d[6][7]),
+        "+f"(d[7][0]), "+f"(d[7][1]), "+f"(d[7][2]), "+f"(d[7][3]), "+f"(d[7][4]), "+f"(d[7][5]), "+f"(d[7][6]), "+f"(d[7][7]),
+        "+f"(d[8][0]), "+f"(d[8][1]), "+f"(d[8][2]), "+f"(d[8][3]), "+f"(d[8][4]), "+f"(d[8][5]), "+f"(d[8][6]), "+f"(d[8][7]),
+        "+f"(d[9][0]), "+f"(d[9][1]), "+f"(d[9][2]), "+f"(d[9][3]), "+f"(d[9][4]), "+f"(d[9][5]), "+f"(d[9][6]), "+f"(d[9][7]),
+        "+f"(d[10][0]), "+f"(d[10][1]), "+f"(d[10][2]), "+f"(d[10][3]), "+f"(d[10][4]), "+f"(d[10][5]), "+f"(d[10][6]), "+f"(d[10][7]),
+        "+f"(d[11][0]), "+f"(d[11][1]), "+f"(d[11][2]), "+f"(d[11][3]), "+f"(d[11][4]), "+f"(d[11][5]), "+f"(d[11][6]), "+f"(d[11][7]),
+        "+f"(d[12][0]), "+f"(d[12][1]), "+f"(d[12][2]), "+f"(d[12][3]), "+f"(d[12][4]), "+f"(d[12][5]), "+f"(d[12][6]), "+f"(d[12][7]),
+        "+f"(d[13][0]), "+f"(d[13][1]), "+f"(d[13][2]), "+f"(d[13][3]), "+f"(d[13][4]), "+f"(d[13][5]), "+f"(d[13][6]), "+f"(d[13][7]),
+        "+f"(d[14][0]), "+f"(d[14][1]), "+f"(d[14][2]), "+f"(d[14][3]), "+f"(d[14][4]), "+f"(d[14][5]), "+f"(d[14][6]), "+f"(d[14][7]),
+        "+f"(d[15][0]), "+f"(d[15][1]), "+f"(d[15][2]), "+f"(d[15][3]), "+f"(d[15][4]), "+f"(d[15][5]), "+f"(d[15][6]), "+f"(d[15][7])
       : "l"(descriptor_a), "l"(descriptor_b), "n"(ScaleD), "n"(1),
         "n"(1), "n"(0), "n"(0));
 }
 
-__global__ __launch_bounds__(kThreads) void k4_tma_wgmma_kernel(
+__global__ __launch_bounds__(kThreads) void k4b_tma_wgmma_kernel(
     const __grid_constant__ CUtensorMap a_map,
     const __grid_constant__ CUtensorMap b_map, __nv_bfloat16 *C, int M, int N,
     int K, int ldC) {
@@ -214,8 +223,8 @@ __global__ __launch_bounds__(kThreads) void k4_tma_wgmma_kernel(
         mbarrier_expect_bytes(&shared.full[stage], kTmaBytes);
         tma_load_2d(shared.A[stage], &a_map, block_row, tile * kTileK,
                     &shared.full[stage]);
-        tma_load_2d(shared.A[stage] + kTmaABoxM * kTileK, &a_map,
-                    block_row + kTmaABoxM, tile * kTileK,
+        tma_load_2d(shared.A[stage] + kTmaABoxRows * kTileK, &a_map,
+                    block_row + kTmaABoxRows, tile * kTileK,
                     &shared.full[stage]);
         tma_load_2d(shared.B[stage], &b_map, tile * kTileK, block_col,
                     &shared.full[stage]);
@@ -244,13 +253,13 @@ __global__ __launch_bounds__(kThreads) void k4_tma_wgmma_kernel(
     const __nv_bfloat16 *b = shared.B[stage];
     warpgroup_fence();
     if (tile == 0) {
-      wgmma_m64n128k16<0>(accum, a, b);
+      wgmma_m64n256k16<0>(accum, a, b);
     } else {
-      wgmma_m64n128k16<1>(accum, a, b);
+      wgmma_m64n256k16<1>(accum, a, b);
     }
 #pragma unroll
     for (int k_step = 1; k_step < kWgmmaKPerTile; ++k_step) {
-      wgmma_m64n128k16<1>(accum, a + k_step * kWgmmaK,
+      wgmma_m64n256k16<1>(accum, a + k_step * kWgmmaK,
                            b + k_step * kWgmmaK);
     }
     warpgroup_commit();
@@ -300,7 +309,7 @@ void encode_tma_map(CUtensorMap *map, const __nv_bfloat16 *pointer, int rows,
   if (status != CUDA_SUCCESS) {
     const char *message = nullptr;
     (void)cuGetErrorString(status, &message);
-    std::fprintf(stderr, "k4_cute: cuTensorMapEncodeTiled failed: %s\n",
+    std::fprintf(stderr, "k4b_tma_wgmma_pipe: cuTensorMapEncodeTiled failed: %s\n",
                  message == nullptr ? "unknown error" : message);
     std::abort();
   }
@@ -308,7 +317,7 @@ void encode_tma_map(CUtensorMap *map, const __nv_bfloat16 *pointer, int rows,
 
 } // namespace
 
-bool k4_cute::supports(const GemmArgs<__nv_bfloat16> &args) {
+bool k4b_tma_wgmma_pipe::supports(const GemmArgs<__nv_bfloat16> &args) {
   const bool dimensions =
       args.C.rows % kTileM == 0 && args.C.cols % kTileN == 0 &&
       args.A.cols % kTileK == 0 && args.A.rows == args.C.rows &&
@@ -329,17 +338,18 @@ bool k4_cute::supports(const GemmArgs<__nv_bfloat16> &args) {
   return dimensions && strides && pointers;
 }
 
-void k4_cute::operator()(GemmArgs<__nv_bfloat16> args,
-                         cudaStream_t stream) const {
+void k4b_tma_wgmma_pipe::operator()(GemmArgs<__nv_bfloat16> args,
+                                     cudaStream_t stream) const {
   if (!supports(args)) {
-    std::fprintf(stderr, "k4_cute: unsupported shape, stride, or alignment\n");
+    std::fprintf(
+        stderr, "k4b_tma_wgmma_pipe: unsupported shape, stride, or alignment\n");
     std::abort();
   }
 
   CUtensorMap a_map{};
   CUtensorMap b_map{};
   encode_tma_map(&a_map, args.A.ptr, args.A.rows, args.A.cols, args.A.ld,
-                 kTmaABoxM, kTileK);
+                 kTmaABoxRows, kTileK);
   encode_tma_map(&b_map, args.B.ptr, args.B.rows, args.B.cols, args.B.ld,
                  kTileK, kTileN);
 
@@ -347,10 +357,10 @@ void k4_cute::operator()(GemmArgs<__nv_bfloat16> args,
                   static_cast<unsigned>(args.C.cols / kTileN), 1);
   const dim3 block(kThreads, 1, 1);
   constexpr int kSharedBytes = static_cast<int>(sizeof(SharedStorage));
-  CUDA_CHECK(cudaFuncSetAttribute(k4_tma_wgmma_kernel,
+  CUDA_CHECK(cudaFuncSetAttribute(k4b_tma_wgmma_kernel,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize,
                                   kSharedBytes));
-  k4_tma_wgmma_kernel<<<grid, block, kSharedBytes, stream>>>(
+  k4b_tma_wgmma_kernel<<<grid, block, kSharedBytes, stream>>>(
       a_map, b_map, args.C.ptr, args.C.rows, args.C.cols, args.A.cols,
       args.C.ld);
   CUDA_CHECK_LAST_ERROR();

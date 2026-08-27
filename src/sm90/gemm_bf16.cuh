@@ -35,12 +35,21 @@ struct k0 {
   void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
 };
 
-// k4_cute — hand-rolled Hopper TMA/WGMMA candidate. The historical name is
-// retained for benchmark continuity.
-struct k4_cute {
-  static constexpr std::string_view name() { return "k4_cute"; }
+// k4a_tma_wgmma_pipe — proven Hopper TMA/WGMMA baseline.
+struct k4a_tma_wgmma_pipe {
+  static constexpr std::string_view name() { return "k4a_tma_wgmma_pipe"; }
   static constexpr std::string_view description() {
-    return "sm90a BF16 inline-PTX TMA/WGMMA; 128x128x64 CTA; 3-stage pipeline; 1 producer + 2 consumer warp-groups";
+    return "sm90a BF16 TMA/WGMMA; 128x128x64 CTA; 3-stage pipeline; 1 producer + 2 consumer warp-groups";
+  }
+  static bool supports(const GemmArgs<__nv_bfloat16> &args);
+  void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
+};
+
+// k4b_tma_wgmma_pipe — wider-N Hopper TMA/WGMMA candidate.
+struct k4b_tma_wgmma_pipe {
+  static constexpr std::string_view name() { return "k4b_tma_wgmma_pipe"; }
+  static constexpr std::string_view description() {
+    return "sm90a BF16 TMA/WGMMA; 128x256x64 CTA; 2-stage pipeline; 1 producer + 2 consumer warp-groups; m64n256k16";
   }
   static bool supports(const GemmArgs<__nv_bfloat16> &args);
   void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;

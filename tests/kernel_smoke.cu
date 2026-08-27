@@ -88,31 +88,38 @@ bool check_padded_kernel(const char *label) {
 int main() {
   using T = gemm_y::dtypes::bf16;
 #if defined(CUDA_ARCH_SM_90)
-  const std::vector<int> sizes = {32, 96, 128};
+  const std::vector<int> sizes = {32, 96, 128, 256};
   gemm_y::Profiler<T> profiler;
   profiler.register_kernel<gemm_y::k0>();
-  profiler.register_kernel_if<gemm_y::k4_cute>(gemm_y::k4_cute::supports);
+  profiler.register_kernel_if<gemm_y::k4a_tma_wgmma_pipe>(
+      gemm_y::k4a_tma_wgmma_pipe::supports);
+  profiler.register_kernel_if<gemm_y::k4b_tma_wgmma_pipe>(
+      gemm_y::k4b_tma_wgmma_pipe::supports);
   const gemm_y::SweepResult result = profiler.run_sweep(sizes);
-  // k4_cute is intentionally full-tile-only at this stage, so it runs only
-  // for N=128 in this mixed registration/dispatch sweep.
-  constexpr std::size_t kExpectedRowsForPartialTileKernels = 2;
-  constexpr std::size_t kExpectedRowsForK4 = 3;
-  if (result.rows.size() != sizes.size() * kExpectedRowsForPartialTileKernels +
-                              kExpectedRowsForK4 - kExpectedRowsForPartialTileKernels)
+  // The k4 candidates are full-tile-only: k4a runs at N=128 and N=256,
+  // while k4b runs at N=256. The mixed sweep compares both at N=256.
+  constexpr std::size_t kExpectedBaseRowsPerN = 2;
+  const std::size_t kExpectedRows =
+      sizes.size() * kExpectedBaseRowsPerN + 3;
+  if (result.rows.size() != kExpectedRows)
     return EXIT_FAILURE;
   for (const int size : sizes) {
     bool has_cublas = false;
     bool has_k0 = false;
-    bool has_k4 = false;
+    bool has_k4a = false;
+    bool has_k4b = false;
     for (const auto &row : result.rows) {
       if (row.N != size)
         continue;
       has_cublas |= row.kernel_name == "cublas";
       has_k0 |= row.kernel_name == "k0";
-      has_k4 |= row.kernel_name == "k4_cute";
+      has_k4a |= row.kernel_name == "k4a_tma_wgmma_pipe";
+      has_k4b |= row.kernel_name == "k4b_tma_wgmma_pipe";
     }
-    if (!has_cublas || !has_k0 || (size == 128 && !has_k4) ||
-        (size != 128 && has_k4))
+    if (!has_cublas || !has_k0 ||
+        (size == 128 && (!has_k4a || has_k4b)) ||
+        (size == 256 && (!has_k4a || !has_k4b)) ||
+        (size != 128 && size != 256 && (has_k4a || has_k4b)))
       return EXIT_FAILURE;
   }
   if (!check_padded_kernel<gemm_y::k0>("k0"))
