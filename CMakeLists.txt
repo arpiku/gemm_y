@@ -33,12 +33,13 @@ endif()
 # ---------------------------------------------------------------------------
 # Usage:
 #   cmake -B build                                    # -> Blackwell sm_120
-#   cmake -B build -DGEMM_Y_CUDA_ARCH=sm_90           # -> Hopper    sm_90
+#   cmake -B build -DGEMM_Y_CUDA_ARCH=sm_90           # -> Hopper    sm_90a
 set(GEMM_Y_CUDA_ARCH "sm_120" CACHE STRING "Target CUDA architecture")
 set_property(CACHE GEMM_Y_CUDA_ARCH PROPERTY STRINGS sm_90 sm_100 sm_120)
 
 if(GEMM_Y_CUDA_ARCH STREQUAL "sm_90")
-    set(_gemm_y_cuda_arch_num 90)
+    # Hopper GMMA/TMA reference path requires the feature-complete 90a target.
+    set(_gemm_y_cuda_arch_num 90a)
     set(_gemm_y_cuda_arch_define CUDA_ARCH_SM_90)
 elseif(GEMM_Y_CUDA_ARCH STREQUAL "sm_100")
     # tcgen05 requires the feature-complete 100a code-generation target.
@@ -159,6 +160,8 @@ string(REPLACE "sm_" "sm" _gemm_y_arch_dir_name ${GEMM_Y_CUDA_ARCH})
 set(_gemm_y_arch_src_dir "${CMAKE_CURRENT_SOURCE_DIR}/src/${_gemm_y_arch_dir_name}")
 if(EXISTS "${_gemm_y_arch_src_dir}")
     file(GLOB _gemm_y_arch_sources CONFIGURE_DEPENDS "${_gemm_y_arch_src_dir}/*.cu")
+    # cute_ref.cu is a standalone reference driver, not a library source.
+    list(FILTER _gemm_y_arch_sources EXCLUDE REGEX "/cute_ref\\.cu$")
 else()
     set(_gemm_y_arch_sources "")
 endif()

@@ -270,7 +270,7 @@ else
 fi
 
 case "$arch" in
-    sm_90) cmake_arch="90" ;;
+    sm_90) cmake_arch="90a" ;;
     sm_100) cmake_arch="100a" ;;
     sm_120) cmake_arch="120" ;;
     *)

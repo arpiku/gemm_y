@@ -91,20 +91,28 @@ int main() {
   const std::vector<int> sizes = {32, 96, 128};
   gemm_y::Profiler<T> profiler;
   profiler.register_kernel<gemm_y::k0>();
+  profiler.register_kernel_if<gemm_y::k4_cute>(gemm_y::k4_cute::supports);
   const gemm_y::SweepResult result = profiler.run_sweep(sizes);
-  constexpr std::size_t kExpectedRowsPerN = 2;
-  if (result.rows.size() != sizes.size() * kExpectedRowsPerN)
+  // k4_cute is intentionally full-tile-only at this stage, so it runs only
+  // for N=128 in this mixed registration/dispatch sweep.
+  constexpr std::size_t kExpectedRowsForPartialTileKernels = 2;
+  constexpr std::size_t kExpectedRowsForK4 = 3;
+  if (result.rows.size() != sizes.size() * kExpectedRowsForPartialTileKernels +
+                              kExpectedRowsForK4 - kExpectedRowsForPartialTileKernels)
     return EXIT_FAILURE;
   for (const int size : sizes) {
     bool has_cublas = false;
     bool has_k0 = false;
+    bool has_k4 = false;
     for (const auto &row : result.rows) {
       if (row.N != size)
         continue;
       has_cublas |= row.kernel_name == "cublas";
       has_k0 |= row.kernel_name == "k0";
+      has_k4 |= row.kernel_name == "k4_cute";
     }
-    if (!has_cublas || !has_k0)
+    if (!has_cublas || !has_k0 || (size == 128 && !has_k4) ||
+        (size != 128 && has_k4))
       return EXIT_FAILURE;
   }
   if (!check_padded_kernel<gemm_y::k0>("k0"))

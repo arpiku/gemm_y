@@ -35,6 +35,17 @@ struct k0 {
   void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
 };
 
+// k4_cute — hand-rolled Hopper TMA/WGMMA candidate. The historical name is
+// retained for benchmark continuity.
+struct k4_cute {
+  static constexpr std::string_view name() { return "k4_cute"; }
+  static constexpr std::string_view description() {
+    return "sm90a BF16 inline-PTX TMA/WGMMA; 128x128x64 CTA; 3-stage pipeline; 1 producer + 2 consumer warp-groups";
+  }
+  static bool supports(const GemmArgs<__nv_bfloat16> &args);
+  void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
+};
+
 // k1_smem — single-buffered cooperative shared-memory tile.
 struct k1_smem {
   static constexpr std::string_view name() { return "k1_smem"; }
