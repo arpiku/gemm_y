@@ -171,6 +171,10 @@ void profile_bf16_kernels(const std::string &arch) {
       gemm_y::k4_t<128, 256, 64, 2>::supports);
   kernels.emplace_back(std::string(gemm_y::k4_t<128, 256, 64, 2>::name()),
                        std::string(gemm_y::k4_t<128, 256, 64, 2>::description()));
+  prof.register_kernel_if<gemm_y::k5_cluster_tma_wgmma>(
+      gemm_y::k5_cluster_tma_wgmma::supports);
+  kernels.emplace_back(std::string(gemm_y::k5_cluster_tma_wgmma::name()),
+                       std::string(gemm_y::k5_cluster_tma_wgmma::description()));
 #endif
 #endif
 

@@ -55,6 +55,21 @@ struct k4b_tma_wgmma_pipe {
   void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
 };
 
+// k5_cluster_tma_wgmma — clustered extension of k4b.
+//
+// A 2x2 CTA cluster uses TMA multicast to share A across the cluster N
+// dimension and B across its M dimension. It is intentionally full-cluster
+// only: square dimensions must be multiples of 512.
+struct k5_cluster_tma_wgmma {
+  static constexpr std::string_view name() { return "k5_cluster_tma_wgmma"; }
+  static constexpr std::string_view description() {
+    return "sm90a BF16 clustered TMA/WGMMA; 2x2 CTA cluster; 128x256x64 "
+           "CTA; 2-stage pipeline; A/B TMA multicast; m64n256k16";
+  }
+  static bool supports(const GemmArgs<__nv_bfloat16> &args);
+  void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
+};
+
 // k4_t — templated Hopper TMA/WGMMA pipeline (generalizes k4a/k4b).
 //
 // Exposes the CTA tile and pipeline depth as compile-time knobs for the

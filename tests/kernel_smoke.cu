@@ -88,7 +88,7 @@ bool check_padded_kernel(const char *label) {
 int main() {
   using T = gemm_y::dtypes::bf16;
 #if defined(CUDA_ARCH_SM_90)
-  const std::vector<int> sizes = {32, 96, 128, 256};
+  const std::vector<int> sizes = {32, 96, 128, 256, 512};
   gemm_y::Profiler<T> profiler;
   profiler.register_kernel<gemm_y::k0>();
   profiler.register_kernel_if<gemm_y::k4a_tma_wgmma_pipe>(
@@ -101,16 +101,18 @@ int main() {
       gemm_y::k4_t<128, 128, 64, 2>::supports);
   profiler.register_kernel_if<gemm_y::k4_t<128, 256, 64, 2>>(
       gemm_y::k4_t<128, 256, 64, 2>::supports);
+  profiler.register_kernel_if<gemm_y::k5_cluster_tma_wgmma>(
+      gemm_y::k5_cluster_tma_wgmma::supports);
   const gemm_y::SweepResult result = profiler.run_sweep(sizes);
   // The k4 candidates are full-tile-only: the 128-wide kernels (k4a,
   // k4_t 128x128) run at N=128 and N=256, while the 256-wide kernels
   // (k4b, k4_t 128x256) run at N=256 only. The mixed sweep compares all
-  // five at N=256.
+  // five at N=256. k5 requires one complete 2x2 cluster and therefore runs
+  // at N=512 in this smoke sweep.
   constexpr std::size_t kExpectedBaseRowsPerN = 2;
-  // +3 k4 rows at N=128 (k4a + two 128-wide k4_t) and +5 at N=256
-  // (k4a, k4b + three k4_t).
+  // +3 rows at N=128, +5 at N=256, and +6 at N=512 (five k4 rows + k5).
   const std::size_t kExpectedRows =
-      sizes.size() * kExpectedBaseRowsPerN + 3 + 5;
+      sizes.size() * kExpectedBaseRowsPerN + 3 + 5 + 6;
   if (result.rows.size() != kExpectedRows)
     return EXIT_FAILURE;
   for (const int size : sizes) {
@@ -121,6 +123,7 @@ int main() {
     bool has_k4_t_128_s3 = false;
     bool has_k4_t_128_s2 = false;
     bool has_k4_t_256_s2 = false;
+    bool has_k5 = false;
     for (const auto &row : result.rows) {
       if (row.N != size)
         continue;
@@ -131,6 +134,7 @@ int main() {
       has_k4_t_128_s3 |= row.kernel_name == "k4_t_128x128x64_s3";
       has_k4_t_128_s2 |= row.kernel_name == "k4_t_128x128x64_s2";
       has_k4_t_256_s2 |= row.kernel_name == "k4_t_128x256x64_s2";
+      has_k5 |= row.kernel_name == "k5_cluster_tma_wgmma";
     }
     const bool has_k4_t_128 = has_k4_t_128_s3 && has_k4_t_128_s2;
     const bool has_any_k4_t = has_k4_t_128 || has_k4_t_256_s2;
@@ -138,9 +142,11 @@ int main() {
         (size == 128 &&
          (!has_k4a || !has_k4_t_128 || has_k4b || has_k4_t_256_s2)) ||
         (size == 256 && (!has_k4a || !has_k4b || !has_k4_t_128 ||
-                         !has_k4_t_256_s2)) ||
-        (size != 128 && size != 256 &&
-         (has_k4a || has_k4b || has_any_k4_t)))
+                         !has_k4_t_256_s2 || has_k5)) ||
+        (size == 512 && (!has_k4a || !has_k4b || !has_k4_t_128 ||
+                         !has_k4_t_256_s2 || !has_k5)) ||
+        (size != 128 && size != 256 && size != 512 &&
+         (has_k4a || has_k4b || has_any_k4_t || has_k5)))
       return EXIT_FAILURE;
   }
   if (!check_padded_kernel<gemm_y::k0>("k0"))

@@ -2,8 +2,8 @@
 set -Eeuo pipefail
 
 # Edit these connection values before using the remote commands.
-REMOTE_HOST="198.13.252.73"
-REMOTE_PORT="54899"
+REMOTE_HOST="64.247.201.33"
+REMOTE_PORT="11480"
 REMOTE_USER="root"
 SSH_KEY="${HOME}/.ssh/id_ed25519"
 
