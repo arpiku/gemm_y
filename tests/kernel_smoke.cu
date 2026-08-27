@@ -95,12 +95,22 @@ int main() {
       gemm_y::k4a_tma_wgmma_pipe::supports);
   profiler.register_kernel_if<gemm_y::k4b_tma_wgmma_pipe>(
       gemm_y::k4b_tma_wgmma_pipe::supports);
+  profiler.register_kernel_if<gemm_y::k4_t<128, 128, 64, 3>>(
+      gemm_y::k4_t<128, 128, 64, 3>::supports);
+  profiler.register_kernel_if<gemm_y::k4_t<128, 128, 64, 2>>(
+      gemm_y::k4_t<128, 128, 64, 2>::supports);
+  profiler.register_kernel_if<gemm_y::k4_t<128, 256, 64, 2>>(
+      gemm_y::k4_t<128, 256, 64, 2>::supports);
   const gemm_y::SweepResult result = profiler.run_sweep(sizes);
-  // The k4 candidates are full-tile-only: k4a runs at N=128 and N=256,
-  // while k4b runs at N=256. The mixed sweep compares both at N=256.
+  // The k4 candidates are full-tile-only: the 128-wide kernels (k4a,
+  // k4_t 128x128) run at N=128 and N=256, while the 256-wide kernels
+  // (k4b, k4_t 128x256) run at N=256 only. The mixed sweep compares all
+  // five at N=256.
   constexpr std::size_t kExpectedBaseRowsPerN = 2;
+  // +3 k4 rows at N=128 (k4a + two 128-wide k4_t) and +5 at N=256
+  // (k4a, k4b + three k4_t).
   const std::size_t kExpectedRows =
-      sizes.size() * kExpectedBaseRowsPerN + 3;
+      sizes.size() * kExpectedBaseRowsPerN + 3 + 5;
   if (result.rows.size() != kExpectedRows)
     return EXIT_FAILURE;
   for (const int size : sizes) {
@@ -108,6 +118,9 @@ int main() {
     bool has_k0 = false;
     bool has_k4a = false;
     bool has_k4b = false;
+    bool has_k4_t_128_s3 = false;
+    bool has_k4_t_128_s2 = false;
+    bool has_k4_t_256_s2 = false;
     for (const auto &row : result.rows) {
       if (row.N != size)
         continue;
@@ -115,11 +128,19 @@ int main() {
       has_k0 |= row.kernel_name == "k0";
       has_k4a |= row.kernel_name == "k4a_tma_wgmma_pipe";
       has_k4b |= row.kernel_name == "k4b_tma_wgmma_pipe";
+      has_k4_t_128_s3 |= row.kernel_name == "k4_t_128x128x64_s3";
+      has_k4_t_128_s2 |= row.kernel_name == "k4_t_128x128x64_s2";
+      has_k4_t_256_s2 |= row.kernel_name == "k4_t_128x256x64_s2";
     }
+    const bool has_k4_t_128 = has_k4_t_128_s3 && has_k4_t_128_s2;
+    const bool has_any_k4_t = has_k4_t_128 || has_k4_t_256_s2;
     if (!has_cublas || !has_k0 ||
-        (size == 128 && (!has_k4a || has_k4b)) ||
-        (size == 256 && (!has_k4a || !has_k4b)) ||
-        (size != 128 && size != 256 && (has_k4a || has_k4b)))
+        (size == 128 &&
+         (!has_k4a || !has_k4_t_128 || has_k4b || has_k4_t_256_s2)) ||
+        (size == 256 && (!has_k4a || !has_k4b || !has_k4_t_128 ||
+                         !has_k4_t_256_s2)) ||
+        (size != 128 && size != 256 &&
+         (has_k4a || has_k4b || has_any_k4_t)))
       return EXIT_FAILURE;
   }
   if (!check_padded_kernel<gemm_y::k0>("k0"))

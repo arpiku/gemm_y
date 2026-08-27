@@ -55,6 +55,57 @@ struct k4b_tma_wgmma_pipe {
   void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
 };
 
+// k4_t — templated Hopper TMA/WGMMA pipeline (generalizes k4a/k4b).
+//
+// Exposes the CTA tile and pipeline depth as compile-time knobs for the
+// tuning round; the WGMMA instruction shape is derived from TileN
+// (m64n128k16 or m64n256k16). TileM=128 (one producer + two consumer
+// warp-groups) and TileK=64 (128B-swizzled TMA boxes) are fixed this round;
+// widening them requires new WGMMA shapes / TMA box encodings.
+template <int TileM, int TileN, int TileK, int Stages> struct k4_t {
+  static_assert(TileM == 128,
+                "k4_t currently requires TileM=128 (two consumer warp-groups)");
+  static_assert(TileN == 128 || TileN == 256,
+                "k4_t supports TileN=128 (m64n128k16) or TileN=256 (m64n256k16)");
+  static_assert(TileK == 64,
+                "k4_t currently requires TileK=64 (128B-swizzled TMA boxes)");
+  static_assert(Stages >= 2, "k4_t needs at least two pipeline stages");
+
+  static constexpr std::string_view name() {
+    if constexpr (TileM == 128 && TileN == 128 && TileK == 64 && Stages == 3) {
+      return "k4_t_128x128x64_s3";
+    } else if constexpr (TileM == 128 && TileN == 128 && TileK == 64 &&
+                         Stages == 2) {
+      return "k4_t_128x128x64_s2";
+    } else if constexpr (TileM == 128 && TileN == 256 && TileK == 64 &&
+                         Stages == 2) {
+      return "k4_t_128x256x64_s2";
+    } else {
+      return "k4_t_custom";
+    }
+  }
+
+  static constexpr std::string_view description() {
+    if constexpr (TileM == 128 && TileN == 128 && TileK == 64 && Stages == 3) {
+      return "sm90a BF16 TMA/WGMMA (templated); 128x128x64 CTA; 3-stage "
+             "pipeline; m64n128k16";
+    } else if constexpr (TileM == 128 && TileN == 128 && TileK == 64 &&
+                         Stages == 2) {
+      return "sm90a BF16 TMA/WGMMA (templated); 128x128x64 CTA; 2-stage "
+             "pipeline; m64n128k16";
+    } else if constexpr (TileM == 128 && TileN == 256 && TileK == 64 &&
+                         Stages == 2) {
+      return "sm90a BF16 TMA/WGMMA (templated); 128x256x64 CTA; 2-stage "
+             "pipeline; m64n256k16";
+    } else {
+      return "sm90a BF16 TMA/WGMMA (templated); custom tile/stage config";
+    }
+  }
+
+  static bool supports(const GemmArgs<__nv_bfloat16> &args);
+  void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
+};
+
 // k1_smem — single-buffered cooperative shared-memory tile.
 struct k1_smem {
   static constexpr std::string_view name() { return "k1_smem"; }

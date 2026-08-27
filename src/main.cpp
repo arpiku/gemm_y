@@ -157,6 +157,20 @@ void profile_bf16_kernels(const std::string &arch) {
       gemm_y::k4b_tma_wgmma_pipe::supports);
   kernels.emplace_back(std::string(gemm_y::k4b_tma_wgmma_pipe::name()),
                        std::string(gemm_y::k4b_tma_wgmma_pipe::description()));
+  // k4_t tuning-round candidates: k4a/k4b equivalents plus the 2-stage
+  // 128x128 variant. Data from this sweep feeds the k4_dispatch switch.
+  prof.register_kernel_if<gemm_y::k4_t<128, 128, 64, 3>>(
+      gemm_y::k4_t<128, 128, 64, 3>::supports);
+  kernels.emplace_back(std::string(gemm_y::k4_t<128, 128, 64, 3>::name()),
+                       std::string(gemm_y::k4_t<128, 128, 64, 3>::description()));
+  prof.register_kernel_if<gemm_y::k4_t<128, 128, 64, 2>>(
+      gemm_y::k4_t<128, 128, 64, 2>::supports);
+  kernels.emplace_back(std::string(gemm_y::k4_t<128, 128, 64, 2>::name()),
+                       std::string(gemm_y::k4_t<128, 128, 64, 2>::description()));
+  prof.register_kernel_if<gemm_y::k4_t<128, 256, 64, 2>>(
+      gemm_y::k4_t<128, 256, 64, 2>::supports);
+  kernels.emplace_back(std::string(gemm_y::k4_t<128, 256, 64, 2>::name()),
+                       std::string(gemm_y::k4_t<128, 256, 64, 2>::description()));
 #endif
 #endif
 
