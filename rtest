@@ -9,7 +9,7 @@ SSH_KEY="${HOME}/.ssh/id_ed25519"
 
 REMOTE_ROOT="/workspace/gemm_y"
 REMOTE_ARCHIVE="/workspace/gemm_y-source.tar.gz"
-REMOTE_ARCH="sm_100"
+REMOTE_ARCH="sm_90"
 LOCAL_ARCHIVE="artifacts/rtest/source.tar.gz"
 LOCAL_FETCH_DIR="artifacts/rtest/remote"
 

@@ -29,6 +29,9 @@ constexpr int kWgmmaM = 64;
 constexpr int kWgmmaN = 128;
 constexpr int kWgmmaK = 16;
 constexpr int kWgmmaKPerTile = kTileK / kWgmmaK;
+// A's minor dimension is split into two 64-row boxes because a 128B
+// swizzle cannot encode a 128-element BF16 minor dimension (256 bytes).
+constexpr int kTmaABoxM = kTileM / 2;
 constexpr int kTmaBytes =
     (kTileM * kTileK + kTileK * kTileN) * sizeof(__nv_bfloat16);
 constexpr int kTmaStrideAlignmentBytes = 16;
@@ -211,6 +214,9 @@ __global__ __launch_bounds__(kThreads) void k4_tma_wgmma_kernel(
         mbarrier_expect_bytes(&shared.full[stage], kTmaBytes);
         tma_load_2d(shared.A[stage], &a_map, block_row, tile * kTileK,
                     &shared.full[stage]);
+        tma_load_2d(shared.A[stage] + kTmaABoxM * kTileK, &a_map,
+                    block_row + kTmaABoxM, tile * kTileK,
+                    &shared.full[stage]);
         tma_load_2d(shared.B[stage], &b_map, tile * kTileK, block_col,
                     &shared.full[stage]);
       }
@@ -333,7 +339,7 @@ void k4_cute::operator()(GemmArgs<__nv_bfloat16> args,
   CUtensorMap a_map{};
   CUtensorMap b_map{};
   encode_tma_map(&a_map, args.A.ptr, args.A.rows, args.A.cols, args.A.ld,
-                 kTileM, kTileK);
+                 kTmaABoxM, kTileK);
   encode_tma_map(&b_map, args.B.ptr, args.B.rows, args.B.cols, args.B.ld,
                  kTileK, kTileN);
 
