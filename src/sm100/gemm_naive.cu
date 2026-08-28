@@ -7,10 +7,7 @@
 // fp16/tfloat sweeps a custom kernel to compare against cuBLAS. The struct
 // declaration lives in the matching .cuh so main.cpp (a C++ TU) can
 // register it with the Profiler.
-//
-// Layering (ARD §3): the device __global__ function takes raw pointers +
-// dimension ints (pure CUDA, no project includes). The operator() functor
-// is the thin adapter that unpacks GemmArgs<T> into the raw-pointer call.
+
 
 #include "gemm_naive.cuh"
 

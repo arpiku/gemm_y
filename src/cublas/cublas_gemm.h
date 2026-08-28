@@ -4,10 +4,10 @@
 // is CUDA_R_32F for all paths (fp32 accumulation). The math mode is selected
 // per dtype via CublasTypeMap<T>::math_mode: bf16/fp16 use CUBLAS_DEFAULT_MATH
 // (tensor cores, fp32 accum); tfloat uses CUBLAS_TF32_CUBLAS_MATH (tf32 TC).
-// The pedantic fp32 / CUDA-core path is dropped — see ARD §9.
+// The pedantic fp32 / CUDA-core path is dropped.
 //
 // Stream binding is per-call (cublasSetStream), not on the handle — see
-// ARD.md §5.5. Uses stream = nullptr (legacy default stream).
+// Uses stream = nullptr (legacy default stream).
 
 #pragma once
 
@@ -22,7 +22,7 @@ namespace detail {
 
 // Maps a host dtype T -> cublas data type, compute type, and math mode.
 // bf16/fp16: tensor cores, fp32 accum, DEFAULT_MATH.
-// tfloat:    tf32 tensor cores, fp32 accum, TF32_CUBLAS_MATH (see ARD §9).
+// tfloat:    tf32 tensor cores, fp32 accum, TF32_CUBLAS_MATH.
 template <typename T> struct CublasTypeMap;
 template <> struct CublasTypeMap<__nv_bfloat16> {
     static constexpr cudaDataType_t data_type    = CUDA_R_16BF;

@@ -3,7 +3,7 @@
 // One handle is owned by each Profiler<T> (not a process singleton). Setup
 // is done once in the ctor; stream binding is per-call (in cublas_gemm),
 // so Phase 2 async pipelining can bind different streams without recreating
-// the handle (see ARD.md §5.5).
+// the handle
 //
 // Not thread-safe: cuBLAS handles are not thread-safe, and the bench is
 // single-threaded. If multi-threaded bench is ever needed, allocate one
@@ -57,7 +57,7 @@ private:
 // RAII guard for cuBLAS math mode. Captures the current mode via
 // cublasGetMathMode, sets a new mode in the ctor, and restores the
 // previous mode in the dtor. Used by cublas_gemm to apply
-// CublasTypeMap<T>::math_mode per call (see ARD §9).
+// CublasTypeMap<T>::math_mode per call
 //
 // Non-thread-safe: the math mode is handle state, so concurrent calls on
 // the same handle with different modes would race. Bench is single-

@@ -2,11 +2,11 @@
 //
 // One Profiler<T> instance per dtype. cuBLAS is the implicit reference: run
 // first per N, cached on device (C_ref), and used as the accuracy ground
-// truth. Custom kernels write to a separate C buffer (see ARD.md §4, §5).
+// truth. Custom kernels write to a separate C buffer .
 //
 // register_kernel<K>() type-erases into std::function once at registration.
 // Stateless K (the common case) fits SBO; stateful K pays one heap alloc,
-// amortized across the full sweep (see ARD.md §4 overhead analysis).
+// amortized across the full sweep .
 //
 // run_sweep returns SweepResult — a vector of SweepRow — instead of writing
 // CSV directly. main.cpp owns CsvWriter and iterates result.rows. This
@@ -15,12 +15,12 @@
 // SweepResult, and its kernel_min_ns / kernel_median_ns are reused as the
 // ref_* columns for every subsequent kernel row at that N.
 //
-// Measurement (ARD §7, §19): all kernels and cuBLAS run on a single owned
+// Measurement :all kernels and cuBLAS run on a single owned
 // CUDA stream (`stream_`). A `cudaStreamSynchronize` after each warmup loop
 // ensures the GPU is idle before the timed loop begins. One CudaTimer
 // (`timer_`) is reused across the entire sweep — one cudaEventCreate/Destroy
 // pair instead of ~224. h2d_ns/d2h_ns are no longer reported (harness
-// overhead, not kernel performance — see ARD §2E).
+// overhead, not kernel performance).
 
 #pragma once
 
@@ -65,7 +65,7 @@ struct SweepRow {
     // Raw timed samples (ns) as a semicolon-separated string, e.g.
     // "1234.5;1235.1;...". Populated from the kTimed (50) cudaEvent samples.
     // Empty for rows where samples weren't collected. Parsed by ingest.py
-    // into the `samples` table for distribution / diff views (ARD §20).
+    // into the `samples` table for distribution / diff views.
     std::string kernel_samples_ns;
 };
 

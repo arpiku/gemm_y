@@ -4,10 +4,7 @@
 // mapping (previously a free function dtype_name<T>() in Profiler.cu).
 // cuda_compat.h now only handles CUDA header inclusion + diagnostic
 // suppression; this header pulls in the underlying CUDA types it needs.
-//
-// The pedantic fp32 / CUDA-core path is dropped entirely (see ARD §9).
-// 32-bit float storage uses the tf32 tensor-core path exclusively:
-//   tfloat = float  // tfloat = tf32 path (TC), not pedantic fp32 (CUDA cores).
+
 
 #pragma once
 
@@ -23,7 +20,6 @@ using fp16   = __half;
 using tfloat = float;  // tfloat = tf32 path (TC), not pedantic fp32 (CUDA cores).
 
 // Short name for use in CSV `dtype` column, log output, and file paths.
-// Note: name<float>() returns "tf32" (the only float path; see ARD §9).
 template <typename T> constexpr std::string_view name();
 template <> constexpr std::string_view name<__nv_bfloat16>() { return "bf16"; }
 template <> constexpr std::string_view name<__half>()        { return "fp16"; }

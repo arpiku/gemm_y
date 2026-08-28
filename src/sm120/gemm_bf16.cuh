@@ -11,7 +11,6 @@
 // auto-picks new .cu files; zero CMake changes per kernel.
 //
 // NaiveGemm<T> (the dtype-agnostic sanity baseline) lives in
-// gemm_naive.{cuh,cu}, not here. See ARD §16.
 
 #pragma once
 

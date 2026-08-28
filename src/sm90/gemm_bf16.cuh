@@ -1,6 +1,4 @@
 // gemm_bf16.cuh — shared declaration header for all bf16-specific custom
-// kernels on sm_90 (Hopper). Mirror of src/sm120/gemm_bf16.cuh; divergence
-// between arches begins with tensor-core kernels (see ARD §8, §16).
 //
 // Each declaration here provides name(), description(), and
 // operator()(GemmArgs<__nv_bfloat16>, cudaStream_t) const. Kernel families may
@@ -10,9 +8,6 @@
 // (compile isolation — a one-line edit to k5 should not recompile k0–k4).
 // CMake's file(GLOB _gemm_y_arch_sources CONFIGURE_DEPENDS "${arch_dir}/*.cu")
 // auto-picks new .cu files; zero CMake changes per kernel.
-//
-// NaiveGemm<T> (the dtype-agnostic sanity baseline) lives in
-// gemm_naive.{cuh,cu}, not here. See ARD §16.
 
 #pragma once
 

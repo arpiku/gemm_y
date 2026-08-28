@@ -1,15 +1,11 @@
 // memcpy_microbench.cu — sweeps H2D / D2H memcpy variants across N in
 // {32,64,128,256,512,1024,2048,4096} and reports min + median per variant.
-// Warmup=20, timed=50 (see ARD.md §11).
+// Warmup=20, timed=50
 //
 // Variants per direction:
 //   - cudaMemcpy       (sync, contiguous)
 //   - cudaMemcpyAsync  (default stream + sync)
-//
-// Hypothesis: sync vs async identical (no overlap on the default stream).
-// Decision recorded in ARD.md §2. Prints a human-readable aligned table
-// instead of raw CSV. The strided_2d (cudaMemcpy2D) variants were deleted
-// in Phase 2D — the bench runner uses contiguous cudaMemcpy exclusively
+
 // (per-N allocation, ld == N).
 
 #include <string>

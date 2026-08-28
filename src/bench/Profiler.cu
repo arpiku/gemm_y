@@ -5,11 +5,11 @@
 // run_sweep returns SweepResult (decoupled from CSV I/O); cuBLAS is
 // measured once per N and reused as ref_* for all kernels.
 //
-// Per-N allocation (ARD §5 revised): A/B/C/C_ref (device + host) are
+// Per-N allocation : A/B/C/C_ref (device + host) are
 // allocated N×N inside the per-N loop. ld == N for every kernel launch.
 // cudaMemcpy is called directly (no Copy.h wrapper); buffers are contiguous.
 //
-// Measurement (ARD §7, §19): all kernels and cuBLAS run on the owned
+// Measurement all kernels and cuBLAS run on the owned
 // stream_ (one stream per Profiler). A cudaStreamSynchronize after each
 // warmup loop ensures the GPU is idle before the timed loop begins. The
 // timer_ member is reused across the entire sweep (one event pair). h2d_ns
@@ -42,7 +42,7 @@ constexpr int kTimed = 50;
 
 // Serialize the kTimed elapsed-ms samples (converted to ns) as a
 // semicolon-separated string for the CSV `kernel_samples_ns` column.
-// Parsed by ingest.py into the `samples` table (ARD §20).
+// Parsed by ingest.py into the `samples` table .
 std::string serialize_samples_ns(const std::vector<float> &ms) {
   std::string out;
   out.reserve(ms.size() * 12); // ~12 chars per "1234567.89;"
@@ -163,7 +163,7 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int> &sizes) {
       // Debug-build OOB check: snapshot C_ref's N×N buffer on the host
       // before the custom kernel runs; verify unchanged after. Catches
       // out-of-bounds writes that would otherwise silently corrupt the
-      // reference (see ARD.md §5.1). Contiguous cudaMemcpy + memcmp.
+      // reference . Contiguous cudaMemcpy + memcmp.
       std::vector<T> cref_snapshot;
 #ifndef NDEBUG
       {
@@ -219,7 +219,7 @@ SweepResult Profiler<T>::run_sweep(const std::vector<int> &sizes) {
 #endif
 
       // Skip-on-fail: timing of mathematically invalid kernels is
-      // meaningless (see ARD.md §6). Print stderr FAIL and continue
+      // meaningless . Print stderr FAIL and continue
       // without writing the row. cuBLAS reference rows are always
       // written (they're pushed before this loop, err == 0).
       constexpr double tol = kRelErrTol<T>();

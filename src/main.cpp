@@ -1,12 +1,7 @@
 // main.cpp — gemm_y entry point.
 //
-// Runs the configured dtype sweeps. The bf16 sweep registers the naive
-// baseline, the tuned k1_dispatch strategy, and the k1_smem comparison
-// control, then writes the CSV and a key=value `.meta` sidecar to results/.
-// Other dtype sweeps currently retain the naive baseline only.
-//
-// One (arch, dtype) pair per CSV. tf32 rows live in the tfloat CSV (the
-// only float path — see ARD §9). Hardcoded sweep (no argparse dependency).
+// Runs the configured dtype sweeps.
+// One (arch, dtype) pair per CSV. Hardcoded sweep (no argparse dependency).
 
 #include <chrono>
 #include <cstdio>

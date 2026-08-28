@@ -4,7 +4,7 @@
 // per-iteration elapsed-ms samples to {min, median, std, p95, ci_low, ci_high}.
 // Extracted here to eliminate the duplicated `summarize` logic.
 //
-// Statistical methodology (ARD §19):
+// Statistical methodology:
 //   - std: sample standard deviation (n-1 denominator).
 //   - p95: 95th percentile (sort, index ceil(0.95*n)-1; n=50 -> index 47).
 //   - 95% CI for the median: median ± 1.253 * std / sqrt(n). The 1.253

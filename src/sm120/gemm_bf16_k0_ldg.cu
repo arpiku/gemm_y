@@ -3,9 +3,7 @@
 // This keeps the one-thread-per-output baseline unchanged except for explicit
 // __ldg loads of the read-only A and B operands.
 //
-// Layering (ARD §3): the device __global__ function takes raw pointers +
-// dimension ints (pure CUDA, no project includes). The operator() functor
-// is the thin adapter that unpacks GemmArgs<T> into the raw-pointer call.
+
 
 #include "gemm_bf16.cuh"
 
