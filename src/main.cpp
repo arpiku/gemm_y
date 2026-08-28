@@ -157,8 +157,6 @@ void profile_bf16_kernels(const std::string &arch) {
       gemm_y::k4b_tma_wgmma_pipe::supports);
   kernels.emplace_back(std::string(gemm_y::k4b_tma_wgmma_pipe::name()),
                        std::string(gemm_y::k4b_tma_wgmma_pipe::description()));
-  // k4_t tuning-round candidates: k4a/k4b equivalents plus the 2-stage
-  // 128x128 variant. Data from this sweep feeds the k4_dispatch switch.
   prof.register_kernel_if<gemm_y::k4_t<128, 128, 64, 3>>(
       gemm_y::k4_t<128, 128, 64, 3>::supports);
   kernels.emplace_back(std::string(gemm_y::k4_t<128, 128, 64, 3>::name()),
@@ -196,7 +194,6 @@ void profile_bf16_kernels(const std::string &arch) {
               out_csv.c_str());
 }
 
-// TODO: Optimize the fp16 kernels, after bf16
 void profile_fp16_kernels(const std::string &arch) {
   using T = gemm_y::dtypes::fp16;
   gemm_y::Profiler<T> prof;
@@ -220,7 +217,7 @@ void profile_fp16_kernels(const std::string &arch) {
               out_csv.c_str());
 }
 
-// TODO: Optimize the tf32 kernels, after fp16
+
 void profile_tf32_kernels(const std::string &arch) {
   using T = gemm_y::dtypes::tfloat;
   gemm_y::Profiler<T> prof;

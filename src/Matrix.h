@@ -1,8 +1,8 @@
 // Matrix.h — owning matrix: Buffer<T,S> + shape (rows, cols, ld).
 //
 // Owns a Buffer<T,S> and exposes a MatrixView over it. ld == rows
-// unconditionally (ColMajor is the only layout; see AGENTS.md). Move-only
-// (inherits from Buffer). Factory: Matrix<T,S>::alloc(rows, cols).
+// unconditionally because ColMajor is the only layout. Move-only (inherits
+// from Buffer). Factory: Matrix<T,S>::alloc(rows, cols).
 //
 // const Matrix returns MatrixView<const T, S>; non-const returns MatrixView<T, S>.
 

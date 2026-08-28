@@ -1,4 +1,4 @@
-// gemm_bf16_k2_tma_mma.cu — sm120 BF16 TMA + explicit MMA candidate.
+// gemm_bf16_k2_tma_mma.cu — sm120 BF16 TMA + explicit MMA kernel.
 //
 // TMA stages a 64x16 A tile and a 16x64 B tile. Each warp computes a
 // 16x32 output tile using four explicit m16n8k16 BF16 MMA operations.

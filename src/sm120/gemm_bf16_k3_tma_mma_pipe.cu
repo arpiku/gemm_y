@@ -1,4 +1,4 @@
-// gemm_bf16_k3_tma_mma_pipe.cu — sm120 BF16 pipelined TMA + MMA candidate.
+// gemm_bf16_k3_tma_mma_pipe.cu — sm120 BF16 pipelined TMA + MMA kernel.
 //
 // TMA stages two 64x16 A tiles and two 16x64 B tiles. Each warp computes a
 // 16x32 output tile using four explicit m16n8k16 BF16 MMA operations while the

@@ -1,4 +1,4 @@
-// gemm_bf16_k2_tma.cu — first sm120 BF16 TMA staging candidate.
+// gemm_bf16_k2_tma.cu — sm120 BF16 TMA staging kernel.
 //
 // TMA moves one 64x16 A tile and one 16x64 B tile into shared memory. The
 // compute phase intentionally remains scalar FP32 accumulation: this isolates

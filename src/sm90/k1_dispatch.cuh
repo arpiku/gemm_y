@@ -1,8 +1,7 @@
 // k1_dispatch.cuh — production sm120 bf16 dispatch policy.
 //
-// The switch is the source-level result of the completed k1_ tuning round.
-// Candidate selection is compile-time and keyed by the supported square N;
-// k1_smem remains the deterministic fallback for other sizes.
+// The switch is compile-time and keyed by the supported square N; k1_smem
+// remains the deterministic fallback for other sizes.
 
 #pragma once
 

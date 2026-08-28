@@ -14,9 +14,7 @@ namespace bench {
 
 // Fill A with ((i+j) & 7) - 3 and B with ((i-j) & 7) - 3. Small ints in
 // [-3, 4] — fits exactly in bf16, accumulates in fp32 without rounding,
-// so two correct implementations produce bit-identical output. A future
-// phase will use a pattern that produces non-zero reduction-order
-// disagreement.
+// so two correct implementations produce bit-identical output.
 template <typename T>
 void fill_sequential(MatrixView<T, Space::Host> A, MatrixView<T, Space::Host> B) {
     for (int j = 0; j < A.cols; ++j) {

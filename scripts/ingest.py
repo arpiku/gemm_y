@@ -128,7 +128,7 @@ def ingest(
     source_csv = str(csv_path)
     source_meta = str(meta_path)
 
-    # CSV schema (Phase 2G):
+    # CSV schema:
     #   arch,dtype,N,kernel_name,kernel_desc,
     #   kernel_min_ns,kernel_median_ns,kernel_std_ns,kernel_p95_ns,
     #   kernel_ci_low_ns,kernel_ci_high_ns,

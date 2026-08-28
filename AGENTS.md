@@ -55,8 +55,9 @@ sudo scripts/bench.sh [./build/gemm_y]
 python scripts/ingest.py results/bench_sm_90_bf16.csv --label "sm90 bf16"
 ```
 
-Do not run `sudo` from an agent; the user runs that command. Remote validation is
-manual and uses `./rtest pack upload run-smoke fetch` (then `run-bench fetch`).
+Run the clock-locking wrapper manually with appropriate privileges. Remote
+validation is manual and uses `./rtest pack upload run-smoke fetch` (then
+`run-bench fetch`).
 Configure its local-only `.rtest.conf` (or `RTEST_CONFIG`) before use; do not
 commit credentials or remote artifacts.
 

@@ -1,9 +1,8 @@
 // tests/test.cu — unit tests for Buffer / MatrixView / Matrix / CudaTimer /
 // CublasHandle / cublas_gemm / NaiveGemm / Profiler.
 //
-// No external test framework (AGENTS.md spirit: no external deps). A tiny
-// hand-rolled assert macro prints failures and counts them. Returns nonzero
-// from main() if any check failed.
+// A small hand-rolled assert macro prints failures and counts them. Returns
+// nonzero from main() if any check failed.
 
 #include <cmath>
 #include <cstdio>

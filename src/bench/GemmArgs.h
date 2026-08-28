@@ -1,8 +1,7 @@
 // GemmArgs.h — POD bundle of device matrix views passed to a kernel.
 //
-// Pass-by-value (fits registers, no aliasing). Future extension point for
-// alpha/beta is commented out — plain C = A * B only (AGENTS.md non-goal:
-// epilogue fusion).
+// Pass-by-value (fits registers, no aliasing). The supported operation is
+// plain C = A * B.
 
 #pragma once
 
@@ -20,8 +19,7 @@ struct GemmArgs {
     MatrixView<const T, Space::Device> A;  // input, read-only
     MatrixView<const T, Space::Device> B;  // input, read-only
     MatrixView<T,       Space::Device> C;  // output, mutable
-    // float alpha = 1.0f;  // reserved for Phase 2+
-    // float beta  = 0.0f;  // reserved for Phase 2+
+
 };
 
 } // namespace gemm_y

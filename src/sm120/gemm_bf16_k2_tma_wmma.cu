@@ -1,4 +1,4 @@
-// gemm_bf16_k2_tma_wmma.cu — sm120 BF16 TMA + WMMA candidate.
+// gemm_bf16_k2_tma_wmma.cu — sm120 BF16 TMA + WMMA kernel.
 //
 // TMA moves one 64x16 A tile and one 16x64 B tile into shared memory. WMMA
 // loads 16x16 warp fragments and performs BF16 MMA with FP32 accumulation.

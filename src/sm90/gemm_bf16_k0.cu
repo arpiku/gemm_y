@@ -1,15 +1,7 @@
-// gemm_bf16_k0.cu — Hopper (sm_90) k0 dummy kernel definition.
+// gemm_bf16_k0.cu — Hopper (sm_90) scalar BF16 baseline.
 //
-// Verbatim copy of NaiveGemm<__nv_bfloat16>::operator() — same triple-loop
-// device kernel, same launch config. Workflow development only; no
-// optimization. The point is to exercise the registration / measurement loop
-// with a real (if perf-identical) kernel before investing in tiled TC kernels.
-// See ARD §16 and TODO 2C.1.
-//
-// Identical to src/sm120/gemm_bf16_k0.cu. Per AGENTS.md and ARD.md §8,
-// arch-specific code lives in separate .cu files (no #ifdef branches);
-// CMake compiles only the directory matching GEMM_Y_CUDA_ARCH. Divergence
-// between arches begins with tensor-core kernels.
+// This implementation mirrors the baseline triple-loop kernel while keeping
+// architecture-specific source files separate.
 
 #include "gemm_bf16.cuh"
 

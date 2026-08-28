@@ -1,8 +1,8 @@
 // gemm_bf16_k1_t_x.cu — isolated k1_t code-generation experiment.
 //
 // This keeps k1_t<64,64,16>'s tile, mapping, and shared-memory layout. The
-// candidate tested explicit __fmaf_rn accumulation, targeted loop unrolling,
-// and compile-time shift/mask index lowering for the fixed power-of-two tile.
+// This version uses explicit __fmaf_rn accumulation, targeted loop
+// unrolling, and compile-time shift/mask index lowering for the fixed tile.
 //
 // The focused CUDA-event comparison passed correctness, but did not improve
 // the baseline: k1_t_x was 6.2 us versus 6.0 us at N=32, tied at 14.4 us

@@ -61,13 +61,12 @@ _GRID_BOLD = {"gridwidth": 1, "gridcolor": "rgba(0,0,0,0.35)", "tickwidth": 1}
 _GRID_LIGHT = {"gridwidth": 1, "gridcolor": "rgba(0,0,0,0.15)", "tickwidth": 1}
 _GRID_PRESETS = {"bold": _GRID_BOLD, "light": _GRID_LIGHT}
 
-# user said the chart felt too short, especially the accuracy tab.
 DEFAULT_CHART_HEIGHT = 640
 
 
 def _axis_layout(log_x: bool, log_y: bool, zeroline_y: bool = False,
                  grid_weight: str = "bold") -> dict:
-    """Shared per-axis grid + tick styling (TODO 2B.3.2 / 2B.3.6).
+    """Shared per-axis grid and tick styling.
 
     - grid_weight: "bold" (timing, comparison — wide y-range) or "light"
       (accuracy — tiny y-range, gridwidth=2 merges into a solid block).
@@ -118,8 +117,7 @@ def _base_layout(title: str, x_title: str, y_title: str,
                  zeroline_y: bool = False,
                  grid_weight: str = "bold",
                  height: int = DEFAULT_CHART_HEIGHT) -> dict:
-    """Shared layout dict: axes + theme + font + legend (TODO 2B.3.2 / 2B.3.3 /
-    2B.3.6 / 2B.3.7).
+    """Shared layout dictionary for axes, theme, font, and legend.
 
     Legend font is one step smaller than the base font to keep the legend
     compact when many runs are selected. Height is runtime-configurable via
@@ -568,17 +566,13 @@ def _accuracy_figure(rows: list[dict], log_log: bool,
                 hovertemplate=(
                     "<b>%{fullData.name}</b><br>"
                     "N=%{x}<br>"
-                    # 2-decimal scientific (TODO 2B.3.8): %.3e -> %.2e.
                     "max_rel_err=%{y:.2e}<extra></extra>"
                 ),
             )
         )
 
-    # Tolerance line(s): one per distinct tol value (TODO 2B.3.4).
-    # Previously one add_hline per (run_id, tol) — with 11 runs and 2–3
-    # distinct tols, the annotations stacked at the same corner. Now we
-    # deduplicate by tol and build a combined label listing the dtypes that
-    # share it (e.g. "tol=1e-02 (bf16) / 1e-03 (fp16, tf32)").
+    # Draw one tolerance line per distinct tolerance and combine dtypes that
+    # share the same value in its label.
     tol_to_dtypes: dict[float, set[str]] = {}
     for r in rows:
         tol = r["tol"]
@@ -601,7 +595,7 @@ def _accuracy_figure(rows: list[dict], log_log: bool,
         y_title="max_rel_err",
         log_x=log_log,
         log_y=log_log,
-        grid_weight="light",  # TODO 2B.3.6: tiny y-range, bold grid merges
+        grid_weight="light",
         height=height,
     ))
     return fig
@@ -612,8 +606,7 @@ def _comparison_figure(rows: list[dict],
     """perf_pct vs N, one line per (run, custom kernel). cuBLAS rows are
     excluded (perf_pct is None for them). Horizontal parity line at 0.
 
-    Default linear y-axis — the percentage is the point; log scale
-    obscures it (ARD §15, TODO 2B.2.3).
+    Default linear y-axis — log scale obscures the percentage.
     """
     fig = go.Figure()
     # Only custom rows have a defined perf_pct.
@@ -652,7 +645,6 @@ def _comparison_figure(rows: list[dict],
                 hovertemplate=(
                     "<b>%{fullData.name}</b><br>"
                     "N=%{x}<br>"
-                    # 2-decimal perf (TODO 2B.3.8): %+.1f -> %+.2f.
                     "perf=%{y:+.2f}% vs cuBLAS (+ = faster)<br>"
                     "arch=%{customdata[0]}<br>"
                     "dtype=%{customdata[1]}<br>"
@@ -689,8 +681,7 @@ def _runs_table() -> list[dict]:
     conn = db.connect()
     try:
         runs = db.list_runs(conn)
-        # Per-run best custom perf_pct at N=4096 (largest common sweep size).
-        # ARD §15 / TODO 2B.2.4: single-number summary per run.
+        # Per-run best custom perf_pct at N=4096, the largest common sweep size.
         perf_by_run: dict[int, float | None] = {}
         for r in runs:
             perf_by_run[r["id"]] = db.best_custom_perf_pct_at_n(
@@ -746,7 +737,7 @@ def build_app() -> dash.Dash:
     app.layout = html.Div(
         style={"display": "flex", "flexDirection": "row", "gap": "16px",
                "padding": "16px", "fontFamily": "sans-serif",
-               "fontSize": 15},  # TODO 2B.3.3: explicit sidebar/page font size
+               "fontSize": 15},
         children=[
             # Sidebar
             html.Div(
@@ -816,9 +807,7 @@ def build_app() -> dash.Dash:
                             labelStyle={"display": "block"},
                         ),
                     ], style={"marginBottom": "12px"}),
-                    # Chart height control (TODO 2B.3.7): runtime control over
-                    # figure height without a server restart. Default bumped
-                    # from 520 to 640 — the user said the chart felt too short.
+                    # Chart height can be changed without restarting the server.
                     html.Div([
                         html.Label("Chart height", style={"fontSize": 14}),
                         dcc.RadioItems(
@@ -899,8 +888,7 @@ def build_app() -> dash.Dash:
         finally:
             conn.close()
         log_log = scale == "log"
-        # Chart height is runtime-configurable via the sidebar (TODO 2B.3.7).
-        # Fall back to the default if the control is missing/None.
+        # Fall back to the default if the control is missing or None.
         height = chart_height if chart_height else DEFAULT_CHART_HEIGHT
         if tab == "timing":
             return dcc.Graph(figure=_timing_figure(rows, log_log, height=height))

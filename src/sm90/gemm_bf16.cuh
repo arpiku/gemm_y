@@ -24,13 +24,11 @@
 
 namespace gemm_y {
 
-// k0 — dummy custom kernel (verbatim naive body). Workflow development
-// only; no optimization. Perf ≈ NaiveGemm. Rename to a descriptive name
-// when a real strategy lands (see ARD §16).
+// k0 — scalar BF16 baseline.
 struct k0 {
   static constexpr std::string_view name() { return "k0"; }
   static constexpr std::string_view description() {
-    return "k0: dummy = naive kernel body (workflow development)";
+    return "k0: scalar BF16 baseline";
   }
   void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
 };
@@ -45,7 +43,7 @@ struct k4a_tma_wgmma_pipe {
   void operator()(GemmArgs<__nv_bfloat16> args, cudaStream_t stream) const;
 };
 
-// k4b_tma_wgmma_pipe — wider-N Hopper TMA/WGMMA candidate.
+// k4b_tma_wgmma_pipe — wider-N Hopper TMA/WGMMA kernel.
 struct k4b_tma_wgmma_pipe {
   static constexpr std::string_view name() { return "k4b_tma_wgmma_pipe"; }
   static constexpr std::string_view description() {

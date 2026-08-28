@@ -139,12 +139,10 @@ endfunction()
 find_package(CUDAToolkit REQUIRED)
 
 # ---------------------------------------------------------------------------
-# CTest registration (Phase 1.7.1)
+# CTest registration
 # ---------------------------------------------------------------------------
-# Minimal wiring: register the existing test_cuda executable as a single
-# CTest entry. Per-test split is premature for ~15 tests — defer until the
-# count grows past ~30. test_cuda's hand-rolled main() returns nonzero on
-# any CHECK failure, so the exit code propagates to CTest directly.
+# Register the test_cuda executable as a single CTest entry. Its hand-rolled
+# main() returns nonzero when a check fails.
 enable_testing()
 
 # ---------------------------------------------------------------------------

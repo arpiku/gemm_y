@@ -1,4 +1,4 @@
-// gemm_bf16_k4_tma_mma_swz.cu — sm120 BF16 swizzled TMA + MMA candidate.
+// gemm_bf16_k4_tma_mma_swz.cu — sm120 BF16 swizzled TMA + MMA kernel.
 //
 // TMA stages two 64x16 A tiles and two 16x64 B tiles. B is written with a
 // 32B TMA swizzle, then cooperatively restored to canonical column-major

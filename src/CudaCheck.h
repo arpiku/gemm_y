@@ -1,8 +1,8 @@
 // CudaCheck.h — error-checking macros for CUDA runtime + cuBLAS + a generic
 // debug-only assert.
 //
-// Per AGENTS.md: no exceptions across the CUDA boundary. Every runtime call
-// is checked; on failure we print file/line/error-string and abort.
+// Every runtime call is checked; failures print file/line/error details and
+// abort.
 //
 //   CUDA_CHECK(expr)            — evaluate `expr` (a cudaError_t), abort on != cudaSuccess.
 //   CUDA_CHECK_LAST_ERROR()    — peek at the async error state (post-launch).

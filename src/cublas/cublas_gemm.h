@@ -1,6 +1,6 @@
 // cublas_gemm.h — thin wrapper around cublasGemmEx.
 //
-// Implicit alpha=1, beta=0 (AGENTS.md non-goal: epilogue fusion). computeType
+// Implicit alpha=1, beta=0. computeType
 // is CUDA_R_32F for all paths (fp32 accumulation). The math mode is selected
 // per dtype via CublasTypeMap<T>::math_mode: bf16/fp16 use CUBLAS_DEFAULT_MATH
 // (tensor cores, fp32 accum); tfloat uses CUBLAS_TF32_CUBLAS_MATH (tf32 TC).
@@ -64,8 +64,7 @@ void cublas_gemm(CublasHandle& handle,
     const int n = C.cols;
     const int k = A.cols;
 
-    // Sanity: shapes must be consistent. We abort (no exceptions across the
-    // CUDA boundary, per AGENTS.md).
+    // Shapes must be consistent before calling cuBLAS; invalid shapes abort.
     if (A.rows != m || A.cols != k || B.rows != k || B.cols != n) {
         std::fprintf(stderr,
                      "cublas_gemm: shape mismatch. A(%dx%d) B(%dx%d) C(%dx%d); "

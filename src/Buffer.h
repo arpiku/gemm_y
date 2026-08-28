@@ -7,8 +7,7 @@
 // The bench runner allocates per-N (see ARD §5), so each Matrix owns its own
 // Buffer for the lifetime of one N's iteration.
 //
-// Per AGENTS.md: RAII for all CUDA resources; never leak raw cudaFree across
-// early returns.
+// CUDA resources are released through RAII, including on early returns.
 
 #pragma once
 
@@ -54,10 +53,7 @@ public:
     [[nodiscard]] std::size_t bytes() const noexcept { return storage_.size() * sizeof(T); }
 
 private:
-    // Host Buffer uses std::vector's default allocator, which gives ~16-byte
-    // alignment (sufficient for host-side reference computation). If a future
-    // phase needs explicit 64-byte alignment (e.g. for AVX-512 host-side
-    // reference), swap in a custom allocator here without touching call sites.
+
     std::vector<T> storage_;
 };
 

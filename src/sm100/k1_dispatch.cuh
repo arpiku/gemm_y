@@ -1,8 +1,7 @@
 // k1_dispatch.cuh — production sm100 bf16 comparison dispatch policy.
 //
-// The switch mirrors the existing architecture-independent k1 comparison
-// policy. Candidate selection is compile-time and keyed by the supported square
-// N; k1_smem remains the deterministic fallback for other sizes.
+// The switch is compile-time and keyed by the supported square N; k1_smem
+// remains the deterministic fallback for other sizes.
 
 #pragma once
 
