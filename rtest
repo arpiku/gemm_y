@@ -1,19 +1,30 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Edit these connection values before using the remote commands.
-REMOTE_HOST="64.247.201.33"
-REMOTE_PORT="11480"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+
+# Safe defaults; use .rtest.conf for machine-specific connection settings.
+REMOTE_HOST="REPLACE_WITH_POD_HOST"
+REMOTE_PORT="22"
 REMOTE_USER="root"
 SSH_KEY="${HOME}/.ssh/id_ed25519"
-
 REMOTE_ROOT="/workspace/gemm_y"
 REMOTE_ARCHIVE="/workspace/gemm_y-source.tar.gz"
 REMOTE_ARCH="sm_90"
 LOCAL_ARCHIVE="artifacts/rtest/source.tar.gz"
 LOCAL_FETCH_DIR="artifacts/rtest/remote"
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+RTEST_CONFIG="${RTEST_CONFIG:-${SCRIPT_DIR}/.rtest.conf}"
+if [[ -f "${RTEST_CONFIG}" ]]; then
+    # shellcheck source=/dev/null
+    source "${RTEST_CONFIG}"
+fi
+
+# REMOTE_USE is the config-file spelling for the SSH login name. Keep
+# REMOTE_USER as a compatibility alias for existing local configurations.
+if [[ -n "${REMOTE_USE-}" ]]; then
+    REMOTE_USER="${REMOTE_USE}"
+fi
 
 usage() {
     cat <<'USAGE'
@@ -38,8 +49,10 @@ Workflow:
   ./rtest fetch
 
 
-Edit REMOTE_HOST, REMOTE_PORT, and SSH_KEY at the top of this script before
-using connect, upload, run-smoke, run-bench, or fetch.
+Create .rtest.conf (it is local-only and ignored by Git) to configure
+REMOTE_HOST, REMOTE_PORT, REMOTE_USE, SSH_KEY, and REMOTE_ARCH before using
+connect, upload, run-smoke, run-bench, or fetch. Set RTEST_CONFIG to use a
+different config path.
 USAGE
 }
 

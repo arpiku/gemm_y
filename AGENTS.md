@@ -57,8 +57,8 @@ python scripts/ingest.py results/bench_sm_90_bf16.csv --label "sm90 bf16"
 
 Do not run `sudo` from an agent; the user runs that command. Remote validation is
 manual and uses `./rtest pack upload run-smoke fetch` (then `run-bench fetch`).
-Edit its connection settings before use and do not commit credentials or
-remote artifacts.
+Configure its local-only `.rtest.conf` (or `RTEST_CONFIG`) before use; do not
+commit credentials or remote artifacts.
 
 ## Repository map
 
@@ -114,8 +114,9 @@ partial tiles. Check launch errors for new or materially changed kernels.
 
 ## Known follow-ups
 
-- Replace live connection values in `rtest` with environment/CLI configuration;
-  keep destructive remote replacement explicitly confirmed.
+- Extend `rtest` configuration with CLI options if environment/config-file
+  configuration becomes insufficient; keep destructive remote replacement
+  explicitly confirmed.
 - Add optimized Hopper BF16 kernels and explicit smoke/regression coverage as
   each candidate lands.
 - Optimize FP16 and TF32 only after the BF16 Hopper path is understood.
